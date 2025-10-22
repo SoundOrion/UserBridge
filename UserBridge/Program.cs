@@ -9,64 +9,16 @@ namespace UserBridge
 {
     /// <summary>
     /// サービス（SYSTEM/管理者）から、アクティブなログインユーザーのセッション内で任意コマンドを実行するユーティリティ。
-    /// 成否にかかわらず、プロセスは必ず終了する設計。
+    /// 時間制限は設けず、成功/失敗にかかわらず本プロセスは確実に終了する。
     /// </summary>
     internal class Program
     {
-        // ====== 強制終了まわり ======
+        // ====== 終了コード ======
         private const int EXIT_SUCCESS = 0;
         private const int EXIT_ACCESS_DENIED = 1;
         private const int EXIT_RUNTIME_ERROR = 2;
-        private const int EXIT_TIMEOUT = 3;
 
         private static int _exitCode = EXIT_RUNTIME_ERROR;
-        private static CancellationTokenSource _watchdogCts;
-
-        /// <summary>
-        /// ウォッチドッグを開始します。既定 60 秒で FailFast -> 最終手段の強制終了。
-        /// 環境変数 USERBRIDGE_TTL_SECONDS で秒数上書き可。
-        /// </summary>
-        private static void StartWatchdog()
-        {
-            int ttl = 60;
-            string env = Environment.GetEnvironmentVariable("USERBRIDGE_TTL_SECONDS");
-            if (!string.IsNullOrWhiteSpace(env) && int.TryParse(env, out var parsed) && parsed > 0)
-                ttl = parsed;
-
-            _watchdogCts = new CancellationTokenSource();
-            var token = _watchdogCts.Token;
-
-            Task.Run(async () =>
-            {
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(ttl), token);
-                    // タイムアウト：即時に落とす
-                    try
-                    {
-                        Environment.FailFast($"Watchdog timeout ({ttl}s) - forcing termination.");
-                    }
-                    catch
-                    {
-                        // ここには通常来ないが、念のため最終手段
-                        Process.GetCurrentProcess().Kill();
-                    }
-                }
-                catch (TaskCanceledException)
-                {
-                    // 正常終了/Exit によりキャンセル
-                }
-            });
-        }
-
-        /// <summary>
-        /// ウォッチドッグを停止します。
-        /// </summary>
-        private static void StopWatchdog()
-        {
-            try { _watchdogCts?.Cancel(); } catch { /* no-op */ }
-            try { _watchdogCts?.Dispose(); } catch { /* no-op */ }
-        }
 
         // ===== P/Invoke =====
 
@@ -407,35 +359,24 @@ namespace UserBridge
         /// </remarks>
         static void Main()
         {
-            // 1) ウォッチドッグ開始（タイムアウト即死）
-            StartWatchdog();
-
-            // 2) グローバル例外ハンドラ（確実に落とす）
+            // グローバル例外ハンドラ（確実に Exit）
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             {
-                try
-                {
-                    EventLog.WriteEntry("BridgeExec", $"未処理例外: {e.ExceptionObject}", EventLogEntryType.Error);
-                }
-                catch { /* EventLog 失敗は無視 */ }
+                try { EventLog.WriteEntry("BridgeExec", $"未処理例外: {e.ExceptionObject}", EventLogEntryType.Error); } catch { }
                 _exitCode = EXIT_RUNTIME_ERROR;
                 Environment.Exit(_exitCode);
             };
             TaskScheduler.UnobservedTaskException += (s, e) =>
             {
                 e.SetObserved();
-                try
-                {
-                    EventLog.WriteEntry("BridgeExec", $"未監視タスク例外: {e.Exception}", EventLogEntryType.Error);
-                }
-                catch { }
+                try { EventLog.WriteEntry("BridgeExec", $"未監視タスク例外: {e.Exception}", EventLogEntryType.Error); } catch { }
                 _exitCode = EXIT_RUNTIME_ERROR;
                 Environment.Exit(_exitCode);
             };
 
             try
             {
-                // 3) 実行権限チェック（SYSTEM or 管理者）:contentReference[oaicite:4]{index=4}
+                // 権限チェック（SYSTEM or 管理者）:contentReference[oaicite:3]{index=3}
                 using (var identity = WindowsIdentity.GetCurrent())
                 {
                     string name = identity.Name;
@@ -444,21 +385,14 @@ namespace UserBridge
 
                     if (!(isSystem || isAdmin))
                     {
-                        try
-                        {
-                            EventLog.WriteEntry("BridgeExec",
-                                $"アクセス拒否: 実行ユーザー={name}",
-                                EventLogEntryType.Warning);
-                        }
-                        catch { }
-
+                        try { EventLog.WriteEntry("BridgeExec", $"アクセス拒否: 実行ユーザー={name}", EventLogEntryType.Warning); } catch { }
                         Console.Error.WriteLine($"Access denied: 実行ユーザー={name}");
                         _exitCode = EXIT_ACCESS_DENIED;
-                        return; // finally で Exit
+                        return; // finally で確実に Exit される
                     }
                 }
 
-                // 4) 例：cscript + VBS をユーザーセッションで実行（必要に応じて差し替え）:contentReference[oaicite:5]{index=5}
+                // 例：ログインユーザー側で cscript + VBS を実行（必要に応じて差し替え）:contentReference[oaicite:4]{index=4}
                 string cscript = Environment.ExpandEnvironmentVariables(@"%SystemRoot%\System32\cscript.exe");
                 string script = @"C:\Scripts\myscript.vbs";
                 RunForActiveUser($"\"{cscript}\" //nologo \"{script}\"", @"C:\Scripts");
@@ -468,17 +402,12 @@ namespace UserBridge
             }
             catch (Exception ex)
             {
-                try
-                {
-                    EventLog.WriteEntry("BridgeExec", $"実行エラー: {ex}", EventLogEntryType.Error);
-                }
-                catch { /* EventLog 失敗は無視 */ }
+                try { EventLog.WriteEntry("BridgeExec", $"実行エラー: {ex}", EventLogEntryType.Error); } catch { }
                 _exitCode = (_exitCode == EXIT_ACCESS_DENIED) ? _exitCode : EXIT_RUNTIME_ERROR;
             }
             finally
             {
-                // 5) 必ず終了
-                StopWatchdog(); // 正常に終われる場合はタイムアウトを止める
+                // 必ず終了
                 Environment.Exit(_exitCode);
             }
         }
