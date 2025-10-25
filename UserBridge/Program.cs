@@ -359,6 +359,34 @@ namespace UserBridge
         /// </remarks>
         static void Main()
         {
+            // === Watchdog (専用スレッド + WaitHandle) ===
+            TimeSpan WATCHDOG_TIMEOUT = TimeSpan.FromMinutes(10); // ←調整可
+            var watchdogCancel = new ManualResetEvent(false);
+
+            var watchdogThread = new Thread(() =>
+            {
+                try
+                {
+                    // 規定時間内にキャンセルが来なければタイムアウト
+                    bool cancelled = watchdogCancel.WaitOne(WATCHDOG_TIMEOUT);
+                    if (!cancelled)
+                    {
+                        try { EventLog.WriteEntry("BridgeExec", $"Watchdog timeout ({WATCHDOG_TIMEOUT}). 強制終了します。", EventLogEntryType.Error); } catch { }
+                        try { Process.GetCurrentProcess().Kill(); } catch { Environment.FailFast("Watchdog timeout (Kill failed)"); }
+                    }
+                }
+                catch
+                {
+                    // ここでの例外は握りつぶす（とにかくプロセスを落とすのが目的）
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "BridgeExec.Watchdog"
+            };
+            watchdogThread.Start();
+            // ===========================================
+
             // グローバル例外ハンドラ（確実に Exit）
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             {
@@ -407,6 +435,15 @@ namespace UserBridge
             }
             finally
             {
+                // 正常／異常終了に関わらずウォッチドッグを停止
+                try
+                {
+                    watchdogCancel.Set();
+                    // バックグラウンドとはいえ、念のため短時間 join
+                    watchdogThread.Join(2000);
+                }
+                catch { }
+
                 // 必ず終了
                 Environment.Exit(_exitCode);
             }
