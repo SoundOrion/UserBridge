@@ -270,7 +270,7 @@ namespace AutoUpdater
                 }
 
                 // --- 差し替え ---
-                if (ReplaceFolderWithZipSafe(sourceZip, targetDir, Path.GetFileName(sourceZip), exePaths))
+                if (!ReplaceFolderWithZipSafe(sourceZip, targetDir, Path.GetFileName(sourceZip), exePaths))
                 {
                     _exitCode = EXIT_RUNTIME_ERROR;
                     return _exitCode;
