@@ -45,13 +45,14 @@ namespace AutoUpdater
         private const string EVENT_SOURCE = "BridgeExec";
         private const string EVENT_LOG = "Application";
 
-        static void Main()
+        static int Main(string[] args)
         {
-            ManualResetEvent watchdogStop = new ManualResetEvent(false);
-            Timer watchdog = new Timer(delegate (object _) {
-                try { SafeLogEvent(string.Format("Watchdog timeout ({0}). 強制終了します。", WATCHDOG_TIMEOUT), EventLogEntryType.Error); } catch { }
-                try { Process.GetCurrentProcess().Kill(); } catch { Environment.FailFast("Watchdog timeout (Kill failed)"); }
-            }, null, WATCHDOG_TIMEOUT, Timeout.InfiniteTimeSpan);
+            if (args.Length > 0 && args[0] == "--client")
+            {
+                // ===== ユーザーセッション側で実行する処理 =====
+                int _exitCode = UserEntryPoint(args.Skip(1).ToArray());
+                return _exitCode;
+            }
 
             AppDomain.CurrentDomain.UnhandledException += delegate (object s, UnhandledExceptionEventArgs e)
             {
@@ -66,6 +67,57 @@ namespace AutoUpdater
                 _exitCode = EXIT_RUNTIME_ERROR;
             };
 
+            try
+            {
+                using (WindowsIdentity id = WindowsIdentity.GetCurrent())
+                {
+                    WindowsPrincipal principal = new WindowsPrincipal(id);
+                    bool isSystem = (id.User != null && id.User.IsWellKnown(WellKnownSidType.LocalSystemSid));
+                    bool isAdmin = principal.IsInRole(WindowsBuiltInRole.Administrator);
+                    if (!(isSystem || isAdmin))
+                    {
+                        LogError("Access denied: 実行ユーザー=" + id.Name);
+                        _exitCode = EXIT_ACCESS_DENIED;
+                        return _exitCode;
+                    }
+                }
+
+                // ===== サービス側（SYSTEM/管理者）で動く処理 =====
+                try
+                {
+                    // 必要に応じて引数を組み立て
+                    string currentExe = Process.GetCurrentProcess().MainModule.FileName;
+                    string clientArgs = "--client \"hello\" 42";
+
+                    // 自分自身をユーザーのアクティブセッションで起動
+                    ProcessLauncher.RunForActiveUser($"\"{currentExe}\" {clientArgs}", Path.GetDirectoryName(currentExe));
+
+                    Log("起動要求OK");
+                    _exitCode = EXIT_SUCCESS;
+                    return _exitCode;
+                }
+                catch (Exception ex)
+                {
+                    SafeLogEvent("RunForActiveUser 実行エラー: " + ex, EventLogEntryType.Error);
+                    _exitCode = EXIT_RUNTIME_ERROR;
+                    return _exitCode;
+                }
+            }
+            catch (Exception ex)
+            {
+                SafeLogEvent("実行エラー: " + ex, EventLogEntryType.Error);
+                _exitCode = EXIT_RUNTIME_ERROR;
+                return _exitCode;
+            }
+            finally
+            {
+                Environment.Exit(_exitCode);
+            }
+        }
+
+        // ユーザーセッション側の“呼びたいメソッド”
+        static int UserEntryPoint(string[] args)
+        {
             Mutex mutex = null;
             bool hasLock = false;
 
@@ -76,7 +128,7 @@ namespace AutoUpdater
                 {
                     LogError("設定ファイルが見つかりません: " + configPath);
                     _exitCode = EXIT_FILE_NOT_FOUND;
-                    return;
+                    return _exitCode;
                 }
 
                 ExeConfigurationFileMap fileMap = new ExeConfigurationFileMap();
@@ -97,7 +149,7 @@ namespace AutoUpdater
                 {
                     LogError("設定値が不足: " + string.Join(", ", missing.ToArray()));
                     _exitCode = EXIT_CONFIG_ERROR;
-                    return;
+                    return _exitCode;
                 }
 
                 string mutexName = MakeGlobalMutexName(targetDir);
@@ -105,86 +157,37 @@ namespace AutoUpdater
 
                 if (mutex == null)
                 {
-                    SafeLogEvent("ミューテックス作成に失敗: " + mutexName, EventLogEntryType.Error);
+                    LogError("ミューテックス作成に失敗: " + mutexName);
                     _exitCode = EXIT_RUNTIME_ERROR;
-                    return;
+                    return _exitCode;
                 }
 
-                if (!mutex.WaitOne(TimeSpan.FromSeconds(2)))
+                if (!mutex.WaitOne(TimeSpan.FromSeconds(10)))
                 {
                     LogError("別のインスタンスが実行中のため中断します。");
                     _exitCode = EXIT_SERVICE_UNAVAILABLE;
-                    return;
+                    return _exitCode;
                 }
                 hasLock = true;
 
-                using (WindowsIdentity id = WindowsIdentity.GetCurrent())
-                {
-                    WindowsPrincipal principal = new WindowsPrincipal(id);
-                    bool isSystem = (id.User != null && id.User.IsWellKnown(WellKnownSidType.LocalSystemSid));
-                    bool isAdmin = principal.IsInRole(WindowsBuiltInRole.Administrator);
-                    if (!(isSystem || isAdmin))
-                    {
-                        LogError("Access denied: 実行ユーザー=" + id.Name);
-                        _exitCode = EXIT_ACCESS_DENIED;
-                        return;
-                    }
-                }
+                // 何らかの処理
 
-                string cscript = ResolveCscriptPath();
-                string script = "C:\\Scripts\\myscript.vbs";
-
-                if (!File.Exists(cscript) || !File.Exists(script))
-                {
-                    LogError("実行ファイルが見つかりません: cscript=" + cscript + ", script=" + script);
-                    _exitCode = EXIT_FILE_NOT_FOUND;
-                    return;
-                }
-
-                string workDir = Path.GetDirectoryName(script) ?? AppDomain.CurrentDomain.BaseDirectory;
-                string cmdLine = string.Format("\"{0}\" //nologo //B \"{1}\"", cscript, script);
-
-                try
-                {
-                    ProcessLauncher.RunForActiveUser(cmdLine, workDir);
-                }
-                catch (Exception ex)
-                {
-                    SafeLogEvent("RunForActiveUser 実行エラー: " + ex, EventLogEntryType.Error);
-                    _exitCode = EXIT_RUNTIME_ERROR;
-                    return;
-                }
-
-                Log("起動要求OK");
                 _exitCode = EXIT_SUCCESS;
-            }
-            catch (OutOfMemoryException oom)
-            {
-                SafeLogEvent("メモリ不足: " + oom, EventLogEntryType.Error);
-                _exitCode = EXIT_OUT_OF_MEMORY;
-            }
-            catch (IOException ioex)
-            {
-                SafeLogEvent("入出力エラー: " + ioex, EventLogEntryType.Error);
-                _exitCode = EXIT_IO_ERROR;
+                return _exitCode;
             }
             catch (Exception ex)
             {
-                SafeLogEvent("実行エラー: " + ex, EventLogEntryType.Error);
+                LogError("実行エラー: " + ex.ToString());
                 _exitCode = EXIT_RUNTIME_ERROR;
+                return _exitCode;
             }
             finally
             {
-                try { watchdog.Change(Timeout.Infinite, Timeout.Infinite); watchdogStop.Set(); } catch { }
                 if (hasLock && mutex != null)
                 {
                     try { mutex.ReleaseMutex(); } catch { }
                 }
                 if (mutex != null) mutex.Dispose();
-                if (watchdog != null) watchdog.Dispose();
-                if (watchdogStop != null) watchdogStop.Dispose();
-
-                Environment.Exit(_exitCode);
             }
         }
 
@@ -226,42 +229,29 @@ namespace AutoUpdater
         static string MakeGlobalMutexName(string targetDir)
         {
             string full = Path.GetFullPath(targetDir).ToUpperInvariant();
-            SHA1 sha = SHA1.Create();
-            string hash = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(full))).Replace("-", "");
-            return "Global\\ZipReplace48_" + hash.Substring(0, 24);
+            using (SHA1 sha = SHA1.Create())
+            {
+                string hash = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(full))).Replace("-", "");
+                return "Global\\ZipReplace48_" + hash.Substring(0, 24);
+            }
         }
 
         static Mutex CreateGlobalMutex(string name)
         {
             try
             {
-                SecurityIdentifier sid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
-                MutexAccessRule rule = new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow);
-                MutexSecurity security = new MutexSecurity();
-                security.AddAccessRule(rule);
-                bool created;
-                Mutex m = new Mutex(false, name, out created);
-                m.SetAccessControl(security);
-                return m;
-            }
-            catch
-            {
-                return null;
-            }
-        }
+                var sid = new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null);
+                var rule = new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow);
+                var sec = new MutexSecurity();
+                sec.AddAccessRule(rule);
 
-        static string ResolveCscriptPath()
-        {
-            string windir = Environment.GetEnvironmentVariable("WINDIR") ?? "C:\\Windows";
-            bool isOS64 = Environment.Is64BitOperatingSystem;
-            bool isProc64 = Environment.Is64BitProcess;
-            if (isOS64 && !isProc64)
-            {
-                string sysnative = Path.Combine(windir, "Sysnative", "cscript.exe");
-                if (File.Exists(sysnative)) return sysnative;
+                bool createdNew;
+                return new Mutex(false, name, out createdNew, sec);
             }
-            string system32 = Path.Combine(windir, "System32", "cscript.exe");
-            return system32;
+            catch 
+            { 
+                return null; 
+            }
         }
     }
 }

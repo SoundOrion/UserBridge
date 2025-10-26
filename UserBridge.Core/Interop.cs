@@ -86,7 +86,19 @@ namespace UserBridge.Core
         internal static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
 
         // --- kernel32 ---
+
+        /// <summary>
+        /// ハンドルを閉じます（CloseHandle）。
+        /// </summary>
+        /// <param name="hObject">閉じるハンドル。</param>
+        /// <returns>成功したら true。</returns>
         [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
 
         /// <summary>
         /// 指定したユーザートークンでプロセスを作成します（CreateProcessAsUser）。
@@ -124,5 +136,13 @@ namespace UserBridge.Core
         internal struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
 
         internal const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+
+        // ===== Win32 定数 =====
+        internal const uint INFINITE = 0xFFFFFFFF;
+        internal const uint WAIT_OBJECT_0 = 0x00000000;
+        internal const uint WAIT_ABANDONED = 0x00000080;
+        internal const uint WAIT_TIMEOUT = 0x00000102;
+        internal const uint WAIT_FAILED = 0xFFFFFFFF;
+        internal const uint STILL_ACTIVE = 259;
     }
 }
