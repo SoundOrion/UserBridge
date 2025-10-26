@@ -201,7 +201,7 @@ namespace AutoUpdater
                 catch (AbandonedMutexException)
                 {
                     // 前回異常終了などでミューテックスが放棄されていた場合
-                    LogError("前回の実行が異常終了していました。ロックを引き継いで続行します。");
+                    Log("前回の実行が異常終了していました。ロックを引き継いで続行します。");
                     hasLock = true;
                 }
 
