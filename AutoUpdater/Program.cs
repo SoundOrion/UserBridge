@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Text;
+using System.IO.Compression;
 using UserBridge.Core;
 
 namespace AutoUpdater
@@ -204,7 +205,76 @@ namespace AutoUpdater
                     hasLock = true;
                 }
 
-                // 何らかの処理
+                // ここから実際の処理
+
+                // フォルダの存在だけチェック
+                if (!Directory.Exists(targetDir))
+                {
+                    LogError("対象フォルダが存在しないため、処理を行いません。");
+                    _exitCode = EXIT_FILE_NOT_FOUND;
+                    return _exitCode;
+                }
+
+                // 元ZIPは必須（ここは従来どおり）
+                if (!File.Exists(sourceZip))
+                {
+                    LogError("元ZIP が見つからないため、処理を行いません。");
+                    _exitCode = EXIT_FILE_NOT_FOUND;
+                    return _exitCode;
+                }
+
+                var targetZip = Path.Combine(targetDir, Path.GetFileName(sourceZip));
+                var exePaths = exeNames.Select(n => Path.Combine(targetDir, n)).ToArray();
+
+                // 任意：プロセス稼働チェック（安全のため維持）
+                if (IsAnyProcessRunning(exePaths))
+                {
+                    LogError("対象の実行ファイルに対応するプロセスが稼働中のため、処理を行いません。");
+                    _exitCode = EXIT_RUNTIME_ERROR;
+                    return _exitCode;
+                }
+
+                // --- 更新要否の判定 ---
+                bool dirEmpty = IsDirectoryEmpty(targetDir);
+                bool hasTargetZip = File.Exists(targetZip);
+
+                var srcZipTimeUtc = File.GetLastWriteTimeUtc(sourceZip);
+
+                // 対象側の「新しさ」＝(a) 対象側ZIPの時刻, (b) 対象フォルダ配下ファイルの最終更新時刻 の最大
+                DateTime? targetZipTimeUtc = hasTargetZip ? File.GetLastWriteTimeUtc(targetZip) : (DateTime?)null;
+                var dirLatestUtc = GetDirectoryLatestWriteTimeUtc(targetDir);
+                var baselineUtc = MaxUtc(targetZipTimeUtc ?? DateTime.MinValue, dirLatestUtc ?? DateTime.MinValue);
+
+                Log($"元ZIP(UTC): {srcZipTimeUtc:O}");
+                Log($"対象側基準(UTC): {baselineUtc:O}");
+                Log($"対象フォルダは空?: {dirEmpty}, 対象側ZIPあり?: {hasTargetZip}");
+
+                // ① フォルダが空 → 更新
+                // ② 対象側ZIPが無い → 更新
+                // ③ 上記以外 → 元ZIPが基準より新しければ更新
+                bool shouldReplace = dirEmpty || !hasTargetZip || srcZipTimeUtc > baselineUtc;
+
+                if (!shouldReplace)
+                {
+                    Log("更新の必要がないため、差し替えは行いません。");
+                    _exitCode = EXIT_SUCCESS;
+                    return _exitCode;
+                }
+
+                // クリティカル区間直前の再チェック
+                if (IsAnyProcessRunning(exePaths))
+                {
+                    LogError("チェック後に対象のプロセスが稼働開始したため、中断します。");
+                    _exitCode = EXIT_RUNTIME_ERROR;
+                    return _exitCode;
+                }
+
+                // --- 差し替え ---
+                if (ReplaceFolderWithZipSafe(sourceZip, targetDir, Path.GetFileName(sourceZip), exePaths))
+                {
+                    _exitCode = EXIT_RUNTIME_ERROR;
+                    return _exitCode;
+                }
 
                 _exitCode = EXIT_SUCCESS;
                 return _exitCode;
@@ -286,6 +356,269 @@ namespace AutoUpdater
             catch 
             { 
                 return null; 
+            }
+        }
+
+
+
+        static bool IsDirectoryEmpty(string path)
+        {
+            try
+            {
+                return !Directory.EnumerateFileSystemEntries(path).Any();
+            }
+            catch
+            {
+                // アクセスできない場合は保守的に「空ではない」とみなす
+                return false;
+            }
+        }
+
+        static DateTime? GetDirectoryLatestWriteTimeUtc(string path)
+        {
+            try
+            {
+                var files = Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories);
+                DateTime latest = DateTime.MinValue;
+                bool any = false;
+                foreach (var f in files)
+                {
+                    DateTime t;
+                    try { t = File.GetLastWriteTimeUtc(f); }
+                    catch { continue; }
+                    if (t > latest) latest = t;
+                    any = true;
+                }
+                return any ? latest : (DateTime?)null;
+            }
+            catch
+            {
+                // 取れなければ「なし」
+                return null;
+            }
+        }
+        static DateTime MaxUtc(DateTime a, DateTime b) => a >= b ? a : b;
+        // exe のフルパスに紐づけて稼働判定（名前衝突を避ける）
+        // アクセスできないケースは保守的に「稼働中とみなす」
+        static bool IsAnyProcessRunning(string[] fullExePaths)
+        {
+            var targets = fullExePaths
+                .Select(p => new { Name = Path.GetFileNameWithoutExtension(p), Path = NormalizeFullPath(p) })
+                .Where(x => !string.IsNullOrWhiteSpace(x.Name))
+                .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var g in targets)
+            {
+                Process[] procs = Array.Empty<Process>();
+                try { procs = Process.GetProcessesByName(g.Key); } catch { }
+
+                foreach (var p in procs)
+                {
+                    try
+                    {
+                        var exePath = p.MainModule?.FileName;
+                        if (exePath == null) return true; // 情報が取れない場合は保守的にtrue
+                        var exeNorm = NormalizeFullPath(exePath);
+                        foreach (var t in g)
+                            if (PathEquals(exeNorm, t.Path)) return true;
+                    }
+                    catch
+                    {
+                        return true; // アクセス失敗時も保守的にtrue
+                    }
+                    finally
+                    {
+                        try { p.Dispose(); } catch { }
+                    }
+                }
+            }
+            return false;
+        }
+
+        static string NormalizeFullPath(string path)
+        {
+            var full = Path.GetFullPath(path);
+            // 末尾セパレータは削る（比較一貫性のため）
+            return full.TrimEnd(Path.DirectorySeparatorChar);
+        }
+
+        static bool PathEquals(string a, string b) =>
+            string.Equals(NormalizeFullPath(a), NormalizeFullPath(b), StringComparison.OrdinalIgnoreCase);
+
+        static bool ReplaceFolderWithZipSafe(string sourceZip, string targetDir, string zipFileName, string[] exePaths)
+        {
+            // 一時展開先（安全に差し替えるため）
+            var tempBase = Path.Combine(Path.GetTempPath(), "ZipReplace_" + Guid.NewGuid().ToString("N"));
+            var tempExtract = Path.Combine(tempBase, "extract");
+            var tempStage = Path.Combine(tempBase, "stage");
+
+            Directory.CreateDirectory(tempExtract);
+            Directory.CreateDirectory(tempStage);
+
+            try
+            {
+                // 安全に展開（Zip Slip / Zip Bomb 防止）
+                SafeExtractZip(sourceZip, tempExtract);
+
+                // ステージングに ZIP 自体も置く（元の仕様どおり）
+                Retry(() => File.Copy(sourceZip, Path.Combine(tempStage, zipFileName), overwrite: true));
+
+                // 展開物をステージングへコピー
+                CopyAll(new DirectoryInfo(tempExtract), new DirectoryInfo(tempStage));
+
+                // 直前再チェック（稼働開始を検知）
+                if (IsAnyProcessRunning(exePaths))
+                {
+                    Log("コピー直前にプロセスが稼働開始したため中断しました。");
+                    return false;
+                }
+
+                // 対象フォルダ内をクリア
+                ClearDirectory(targetDir);
+
+                // ステージング → 対象へコピー（Move ではなく Copy による上書き）
+                CopyAll(new DirectoryInfo(tempStage), new DirectoryInfo(targetDir));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogError("差し替え処理中にエラー: " + ex);
+                return false;
+            }
+            finally
+            {
+                TryDeleteDirectory(tempBase);
+            }
+        }
+
+        // Zip Slip / Zip Bomb 防止つき展開
+        static void SafeExtractZip(string zipPath, string extractDir)
+        {
+            var basePath = Path.GetFullPath(extractDir);
+            if (!basePath.EndsWith(Path.DirectorySeparatorChar.ToString()))
+                basePath += Path.DirectorySeparatorChar; // 末尾セパレータを保証
+
+            using (var zip = ZipFile.OpenRead(zipPath))
+            {
+                foreach (var entry in zip.Entries)
+                {
+                    // ZIPは'/'区切りなので正規化
+                    var entryName = entry.FullName.Replace('/', Path.DirectorySeparatorChar);
+
+                    // 空エントリはスキップ
+                    if (string.IsNullOrEmpty(entryName))
+                        continue;
+
+                    // 絶対パス／ドライブ直指定は禁止
+                    if (Path.IsPathRooted(entryName))
+                        throw new InvalidDataException("無効なZIPエントリ（絶対パス）: " + entry.FullName);
+
+                    var combined = Path.GetFullPath(Path.Combine(basePath, entryName));
+
+                    // ベース配下に収まっているか（末尾セパレータ保護付き）
+                    if (!combined.StartsWith(basePath, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("無効なZIPエントリ（パストラバーサルの可能性）: " + entry.FullName);
+
+                    // ディレクトリエントリ？
+                    if (entry.FullName.EndsWith("/", StringComparison.Ordinal))
+                    {
+                        Directory.CreateDirectory(combined);
+                        continue;
+                    }
+
+                    var dirName = Path.GetDirectoryName(combined);
+                    if (!string.IsNullOrEmpty(dirName))
+                    {
+                        Directory.CreateDirectory(dirName);
+                    }
+                    Retry(() => entry.ExtractToFile(combined, overwrite: true));
+                }
+            }
+        }
+
+        static void ClearDirectory(string dir)
+        {
+            // ファイル削除
+            foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly))
+            {
+                Retry(() =>
+                {
+                    try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
+                    File.Delete(file);
+                });
+            }
+            // サブフォルダ削除
+            foreach (var sub in Directory.EnumerateDirectories(dir, "*", SearchOption.TopDirectoryOnly))
+            {
+                Retry(() => TryDeleteDirectory(sub));
+            }
+        }
+
+        static void CopyAll(DirectoryInfo source, DirectoryInfo target)
+        {
+            // ソースのルート末尾に必ずセパレータを付与し、相対パスの計算を安定化
+            var srcRoot = source.FullName;
+            if (!srcRoot.EndsWith(Path.DirectorySeparatorChar.ToString()))
+                srcRoot += Path.DirectorySeparatorChar;
+
+            // 先にディレクトリを作成
+            foreach (var dir in source.EnumerateDirectories("*", SearchOption.AllDirectories))
+            {
+                var rel = dir.FullName.Substring(srcRoot.Length);
+                var destDir = Path.Combine(target.FullName, rel);
+                Directory.CreateDirectory(destDir);
+            }
+            // ファイルをコピー
+            foreach (var file in source.EnumerateFiles("*", SearchOption.AllDirectories))
+            {
+                var rel = file.FullName.Substring(srcRoot.Length);
+                var dest = Path.Combine(target.FullName, rel);
+                var parent = Path.GetDirectoryName(dest);
+                if (!string.IsNullOrEmpty(parent))
+                    Directory.CreateDirectory(parent);
+                Retry(() =>
+                {
+                    try { if (File.Exists(dest)) File.SetAttributes(dest, FileAttributes.Normal); } catch { }
+                    file.CopyTo(dest, true);
+                });
+            }
+        }
+
+        // 小さなバックオフ付きリトライ（共有違反などの軽微な失敗向け）
+        static void Retry(Action action, int attempts = 5, int initialDelayMs = 80)
+        {
+            var delay = initialDelayMs;
+            for (int i = 1; ; i++)
+            {
+                try
+                {
+                    action();
+                    return;
+                }
+                catch (Exception) when (i < attempts)
+                {
+                    Thread.Sleep(delay);
+                    delay *= 2;
+                }
+            }
+        }
+
+        static void TryDeleteDirectory(string dir)
+        {
+            try
+            {
+                if (Directory.Exists(dir))
+                {
+                    foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                    {
+                        try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
+                    }
+                    Directory.Delete(dir, true);
+                }
+            }
+            catch
+            {
+                // 掃除失敗は致命でないので黙殺
             }
         }
     }
