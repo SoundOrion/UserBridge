@@ -1,0 +1,138 @@
+はい、可能です 👍
+`.NET Framework 4.8.1 Targeting Pack` や `SDK`、`Runtime` は **コマンドライン（cmd.exe / PowerShell）経由**でもインストールできます。
+以下でそれぞれの方法を整理して説明します。
+
+---
+
+## 💿 1. .NET Framework 4.8.1 Targeting Pack のコマンドラインインストール
+
+### 🔸 方法①：Microsoft公式インストーラを直接実行
+
+以下のURLから **オフラインインストーラ（exe）** をダウンロードして、
+cmd から `/quiet` または `/passive` オプションをつけて実行します。
+
+#### 📥 ダウンロード（公式）
+
+* [.NET Framework 4.8.1 Developer Pack (Targeting Pack + SDK)]
+  👉 [https://dotnet.microsoft.com/en-us/download/dotnet-framework/net481](https://dotnet.microsoft.com/en-us/download/dotnet-framework/net481)
+
+#### 📦 コマンド例
+
+```cmd
+cmd.exe /c "NDP481-DevPack-ENU.exe /quiet /norestart"
+```
+
+これで **Targeting Pack + SDK** 両方がインストールされます。
+
+> 💡 `/quiet` はサイレントモード（UI非表示）
+> 💡 `/norestart` は自動再起動を抑止します。
+
+---
+
+### 🔸 方法②：Runtime だけ入れる場合
+
+実行環境（ユーザーPC）にだけランタイムを入れたい場合はこちら：
+
+```cmd
+cmd.exe /c "NDP481-Web.exe /quiet /norestart"
+```
+
+これで **4.8.1 Runtime** が入ります。
+
+---
+
+## 🧰 2. Visual Studio 組み込みコンポーネントとして入れる場合
+
+もし Visual Studio インストーラーをスクリプトで扱いたいなら、
+次のように `vs_installer.exe` 経由で指定インストールも可能です。
+
+### コマンド例
+
+```cmd
+"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify ^
+--installPath "C:\Program Files\Microsoft Visual Studio\2022\Community" ^
+--add Microsoft.Net.Component.4.8.1.TargetingPack ^
+--add Microsoft.Net.Component.4.8.1.SDK ^
+--passive --norestart
+```
+
+> ※ インストールパスは自分のVisual Studioエディションに合わせて変更してください
+> （Community / Professional / Enterpriseなど）
+
+---
+
+## ✅ 3. インストール確認コマンド
+
+Targeting Packが正しく入ったか確認するには：
+
+```cmd
+reg query "HKLM\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full"
+```
+
+出力に `Version    REG_SZ    4.8.09037` などと出ればOKです（数値は4.8.1系）。
+
+---
+
+## 🧩 まとめ
+
+| 目的                         | コマンド                                                                        |
+| -------------------------- | --------------------------------------------------------------------------- |
+| 開発用 (Targeting Pack + SDK) | `cmd.exe /c "NDP481-DevPack-ENU.exe /quiet /norestart"`                     |
+| 実行用 (Runtimeのみ)            | `cmd.exe /c "NDP481-Web.exe /quiet /norestart"`                             |
+| Visual Studio 経由で追加        | `vs_installer.exe modify --add Microsoft.Net.Component.4.8.1.TargetingPack` |
+
+---
+
+もしご希望であれば、
+✅ **オフラインインストール用（完全スタンドアロン）パッケージ** の直接ダウンロードURLも添付できます。
+取得方法を知りたいですか？
+
+OKです 👍
+以下に **.NET Framework 4.8.1 のオフラインインストーラー（公式 Microsoft 配布）** のリンクをまとめます。
+全て **Microsoft公式（dotnet.microsoft.com / microsoft.com）** から入手できます。
+
+---
+
+## 💿 .NET Framework 4.8.1 オフラインインストーラー一覧（公式）
+
+| 種類                                 | 用途                                                         | ダウンロードURL（公式）                                                                                                                              |
+| ---------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| 🧰 **Developer Pack（開発者用）**        | Visual Studio で .NET 4.8.1 向け開発を行う（Targeting Pack + SDK含む） | [https://dotnet.microsoft.com/en-us/download/dotnet-framework/net481](https://dotnet.microsoft.com/en-us/download/dotnet-framework/net481) |
+| ⚙️ **Runtime（実行環境のみ）**             | アプリ実行用（ユーザーPC向け）                                           | [https://go.microsoft.com/fwlink/?linkid=2203305](https://go.microsoft.com/fwlink/?linkid=2203305)                                         |
+| 📦 **Developer Pack（直接EXEダウンロード）** | オフライン用EXE（英語版）                                             | [https://go.microsoft.com/fwlink/?linkid=2203307](https://go.microsoft.com/fwlink/?linkid=2203307)                                         |
+
+---
+
+## 🧩 使い方（cmd.exe から実行）
+
+### 🔸 開発者用（Targeting Pack + SDK）
+
+```cmd
+cmd.exe /c "NDP481-DevPack-ENU.exe /quiet /norestart"
+```
+
+### 🔸 実行環境のみ
+
+```cmd
+cmd.exe /c "NDP481-Web.exe /quiet /norestart"
+```
+
+### 🔸 再起動も自動で行いたい場合
+
+```cmd
+cmd.exe /c "NDP481-DevPack-ENU.exe /quiet /forcerestart"
+```
+
+---
+
+## 🧾 追加情報
+
+* Developer Pack を入れると、Visual Studio の「ターゲットフレームワーク選択」で `.NET Framework 4.8.1` が使えるようになります。
+* Runtime だけでは Visual Studio に「4.8.1」は出ません（開発不可、実行のみ）。
+* これらは **Windows 10 20H2 以降 / Windows 11 / Windows Server 2022** でサポートされています。
+
+---
+
+希望があれば、
+✅ **オフラインインストールを完全自動化するバッチファイル例（.bat）**
+も作成してお渡しできます。作りましょうか？
