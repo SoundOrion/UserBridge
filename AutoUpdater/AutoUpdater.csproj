@@ -35,19 +35,19 @@
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
-<PropertyGroup Condition="'$(Configuration)'=='Release'">
-  <!-- PDBをexeに埋め込みたい場合 -->
-  <DebugType>embedded</DebugType>
-
-  <!-- 外部XMLやPDBをコピーさせない -->
-  <AllowedReferenceRelatedFileExtensions></AllowedReferenceRelatedFileExtensions>
-</PropertyGroup>
-<Target Name="AfterBuild" Condition="'$(Configuration)'=='Release'">
-  <ItemGroup>
-    <Leftovers Include="$(OutDir)System.Configuration.ConfigurationManager.xml" />
-  </ItemGroup>
-  <Delete Files="@(Leftovers)" />
-</Target>
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <!-- PDBをexeに埋め込みたい場合 -->
+    <DebugType>embedded</DebugType>
+    <!-- 外部XMLやPDBをコピーさせない -->
+    <AllowedReferenceRelatedFileExtensions>
+    </AllowedReferenceRelatedFileExtensions>
+  </PropertyGroup>
+  <Target Name="AfterBuild" Condition="'$(Configuration)'=='Release'">
+    <ItemGroup>
+      <Leftovers Include="$(OutDir)System.Configuration.ConfigurationManager.xml" />
+    </ItemGroup>
+    <Delete Files="@(Leftovers)" />
+  </Target>
   <ItemGroup>
     <Reference Include="Costura, Version=6.0.0.0, Culture=neutral, PublicKeyToken=9919ef960d84173d, processorArchitecture=MSIL">
       <HintPath>..\packages\Costura.Fody.6.0.0\lib\netstandard2.0\Costura.dll</HintPath>
@@ -76,7 +76,9 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="AutoUpdater.config" />
+    <None Include="AutoUpdater.config">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
