@@ -187,13 +187,22 @@ namespace AutoUpdater
                     return _exitCode;
                 }
 
-                if (!mutex.WaitOne(TimeSpan.Zero))
+                try
                 {
-                    LogError("別のインスタンスが実行中のため中断します。");
-                    _exitCode = EXIT_SERVICE_UNAVAILABLE;
-                    return _exitCode;
+                    if (!mutex.WaitOne(TimeSpan.Zero))
+                    {
+                        LogError("別のインスタンスが実行中のため中断します。");
+                        _exitCode = EXIT_SERVICE_UNAVAILABLE;
+                        return _exitCode;
+                    }
+                    hasLock = true;
                 }
-                hasLock = true;
+                catch (AbandonedMutexException)
+                {
+                    // 前回異常終了などでミューテックスが放棄されていた場合
+                    LogError("前回の実行が異常終了していました。ロックを引き継いで続行します。");
+                    hasLock = true;
+                }
 
                 // 何らかの処理
 

@@ -100,6 +100,9 @@ namespace UserBridge.Core
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
         /// <summary>
         /// 指定したユーザートークンでプロセスを作成します（CreateProcessAsUser）。
         /// </summary>
