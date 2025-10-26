@@ -41,7 +41,6 @@ namespace AutoUpdater
         private const int EXIT_SERVICE_UNAVAILABLE = 22; // サービス利用不可
 
         private static int _exitCode = EXIT_UNHANDLED_EXCEPTION;
-        private static readonly TimeSpan WATCHDOG_TIMEOUT = TimeSpan.FromMinutes(15);
         private const string EVENT_SOURCE = "BridgeExec";
         private const string EVENT_LOG = "Application";
 
@@ -50,7 +49,7 @@ namespace AutoUpdater
             if (args.Length > 0 && args[0] == "--client")
             {
                 // ===== ユーザーセッション側で実行する処理 =====
-                int _exitCode = UserEntryPoint(args.Skip(1).ToArray());
+                _exitCode = UserEntryPoint(args.Skip(1).ToArray());
                 return _exitCode;
             }
 
@@ -95,7 +94,15 @@ namespace AutoUpdater
                         Path.GetDirectoryName(currentExe),
                         TimeSpan.FromMinutes(15));
 
-                    Log("起動要求OK");
+                    if (_exitCode == EXIT_SUCCESS)
+                    {
+                        Log("ユーザー側処理 成功");
+                    }
+                    else
+                    {
+                        SafeLogEvent($"ユーザー側処理 失敗: ExitCode={_exitCode}", EventLogEntryType.Error);
+                    }
+
                     return _exitCode;
                 }
                 catch (Exception ex)
@@ -111,13 +118,13 @@ namespace AutoUpdater
                 _exitCode = EXIT_RUNTIME_ERROR;
                 return _exitCode;
             }
-            finally
-            {
-                Environment.Exit(_exitCode);
-            }
         }
 
-        // ユーザーセッション側の“呼びたいメソッド”
+        /// <summary>
+        /// ユーザーセッション側の呼びたいメソッド
+        /// </summary>
+        /// <param name="args"></param>
+        /// <returns></returns>
         static int UserEntryPoint(string[] args)
         {
             Mutex mutex = null;
