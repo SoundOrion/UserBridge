@@ -45,10 +45,14 @@ namespace AutoUpdater
         private const string EVENT_SOURCE = "BridgeExec";
         private const string EVENT_LOG = "Application";
 
+        private static readonly TimeSpan WATCHDOG_TIMEOUT = TimeSpan.FromMinutes(10);
+
         /// <summary>
         /// 固定トークン（GUIDなど何でもよい）
         /// </summary>
-        private const string SECRET_TOKEN = "B7F2D5C4-AD19-4F52-A3DE-ABFA11C7E8F5";
+        private static readonly string SECRET_TOKEN =
+            Convert.ToBase64String(SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes("B7F2D5C4-AD19-4F52-A3DE-ABFA11C7E8F5")));
+
 
         static int Main(string[] args)
         {
@@ -143,7 +147,7 @@ namespace AutoUpdater
             {
                 try { LogError("Watchdog timeout (10min). 強制終了"); } catch { }
                 try { Environment.FailFast("Watchdog timeout"); } catch { Process.GetCurrentProcess().Kill(); }
-            }, null, TimeSpan.FromMinutes(10), Timeout.InfiniteTimeSpan);
+            }, null, WATCHDOG_TIMEOUT, Timeout.InfiniteTimeSpan);
 
             Mutex mutex = null;
             bool hasLock = false;
