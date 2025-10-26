@@ -1,3 +1,10 @@
+## 本番稼働中
+- プロジェクト: **B**
+- 反映日: 2025-10-26
+- 由来: `production.json` を参照
+- 本番デプロイ先: <URLや環境名>
+- 本番のコミット: `abcdef1`（リンク）
+
 # 🧩 UserBridge
 
 **UserBridge** は、`NT AUTHORITY\SYSTEM` または管理者権限で実行されたプロセスから、
