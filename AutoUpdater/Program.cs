@@ -90,10 +90,12 @@ namespace AutoUpdater
                     string clientArgs = "--client \"hello\" 42";
 
                     // 自分自身をユーザーのアクティブセッションで起動
-                    ProcessLauncher.RunForActiveUser($"\"{currentExe}\" {clientArgs}", Path.GetDirectoryName(currentExe));
+                    _exitCode = ProcessLauncher.RunForActiveUserAndWait(
+                        $"\"{currentExe}\" {clientArgs}", 
+                        Path.GetDirectoryName(currentExe),
+                        TimeSpan.FromMinutes(15));
 
                     Log("起動要求OK");
-                    _exitCode = EXIT_SUCCESS;
                     return _exitCode;
                 }
                 catch (Exception ex)
