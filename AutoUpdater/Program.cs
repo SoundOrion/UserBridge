@@ -313,12 +313,12 @@ namespace AutoUpdater
             {
                 try { EventLog.WriteEntry(EVENT_SOURCE, message, type); } catch { }
             }
-            try
-            {
-                string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "bridgeexec.log");
-                File.AppendAllText(path, string.Format("[{0:O} UTC] {1}: {2}{3}", DateTime.UtcNow, type, message, Environment.NewLine));
-            }
-            catch { }
+            //try
+            //{
+            //    string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "bridgeexec.log");
+            //    File.AppendAllText(path, string.Format("[{0:O} UTC] {1}: {2}{3}", DateTime.UtcNow, type, message, Environment.NewLine));
+            //}
+            //catch { }
         }
 
         static void Log(string message)
