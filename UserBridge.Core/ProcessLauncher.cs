@@ -82,6 +82,48 @@ namespace UserBridge.Core
             }
         }
 
+        /// <summary>
+        /// 現在アクティブなユーザーセッション（RDP含む）で指定コマンドを実行し、完了まで待機します。
+        /// SYSTEM または管理者権限で実行することを前提としています。
+        /// </summary>
+        /// <param name="commandLine">
+        /// 実行するコマンドライン文字列。  
+        /// 例: <c>"C:\Program Files\App\MyApp.exe" --client TOKEN</c>
+        /// </param>
+        /// <param name="workingDir">
+        /// 実行時の作業ディレクトリ。  
+        /// 通常は対象EXEの存在するフォルダを指定します。
+        /// </param>
+        /// <param name="timeout">
+        /// 待機タイムアウト。  
+        /// 指定した時間を超えてもプロセスが終了しない場合、強制終了します。  
+        /// null を指定すると無期限に待機します。
+        /// </param>
+        /// <returns>
+        /// ユーザー側プロセスの終了コード。  
+        /// タイムアウト時は <c>6</c> を返します。  
+        /// 例外発生時は <see cref="System.ComponentModel.Win32Exception"/> または <see cref="System.InvalidOperationException"/> を送出します。
+        /// </returns>
+        /// <exception cref="System.ComponentModel.Win32Exception">
+        /// Win32 API 呼び出しに失敗した場合に発生します。
+        /// </exception>
+        /// <exception cref="System.InvalidOperationException">
+        /// アクティブなユーザーセッションが見つからなかった場合に発生します。
+        /// </exception>
+        /// <remarks>
+        /// 本メソッドは SYSTEM 権限など高権限コンテキストから呼び出され、
+        /// 対応するアクティブユーザーのデスクトップセッションでプロセスを作成します。  
+        /// 内部的には以下の手順で処理を行います:
+        /// <list type="number">
+        /// <item><description>必要な特権（<c>SE_ASSIGNPRIMARYTOKEN_NAME</c>、<c>SE_INCREASE_QUOTA_NAME</c>）を有効化</description></item>
+        /// <item><description>WTS API によりアクティブセッションを列挙</description></item>
+        /// <item><description>対象セッションのユーザートークンを取得</description></item>
+        /// <item><description>ユーザートークンを Primary トークンへ複製</description></item>
+        /// <item><description>環境ブロックを作成（ユーザー環境変数を継承）</description></item>
+        /// <item><description><c>CreateProcessAsUser</c> によりユーザーセッション上でプロセスを生成</description></item>
+        /// <item><description>プロセス終了を待機。タイムアウト時は強制終了</description></item>
+        /// </list>
+        /// </remarks>
         public static int RunForActiveUserAndWait(string commandLine, string workingDir, TimeSpan? timeout = null)
         {
             // 1) 必要特権を有効化
