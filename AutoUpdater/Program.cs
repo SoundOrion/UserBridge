@@ -127,6 +127,12 @@ namespace AutoUpdater
         /// <returns></returns>
         static int UserEntryPoint(string[] args)
         {
+            Timer watchdog = new Timer(_ =>
+            {
+                try { LogError("Watchdog timeout (10min). 強制終了"); } catch { }
+                try { Environment.FailFast("Watchdog timeout"); } catch { Process.GetCurrentProcess().Kill(); }
+            }, null, TimeSpan.FromMinutes(10), Timeout.InfiniteTimeSpan);
+
             Mutex mutex = null;
             bool hasLock = false;
 
@@ -142,7 +148,17 @@ namespace AutoUpdater
 
                 ExeConfigurationFileMap fileMap = new ExeConfigurationFileMap();
                 fileMap.ExeConfigFilename = configPath;
-                Configuration config = ConfigurationManager.OpenMappedExeConfiguration(fileMap, ConfigurationUserLevel.None);
+                Configuration config;
+                try
+                {
+                    config = ConfigurationManager.OpenMappedExeConfiguration(fileMap, ConfigurationUserLevel.None);
+                }
+                catch (ConfigurationErrorsException cex)
+                {
+                    LogError("設定ファイル読み込みエラー: " + cex.Message);
+                    _exitCode = EXIT_CONFIG_ERROR;
+                    return _exitCode;
+                }
 
                 string sourceZip = config.AppSettings.Settings["SourceZip"] != null ? config.AppSettings.Settings["SourceZip"].Value : null;
                 string targetDir = config.AppSettings.Settings["TargetDir"] != null ? config.AppSettings.Settings["TargetDir"].Value : null;
@@ -171,7 +187,7 @@ namespace AutoUpdater
                     return _exitCode;
                 }
 
-                if (!mutex.WaitOne(TimeSpan.FromSeconds(10)))
+                if (!mutex.WaitOne(TimeSpan.Zero))
                 {
                     LogError("別のインスタンスが実行中のため中断します。");
                     _exitCode = EXIT_SERVICE_UNAVAILABLE;
@@ -197,6 +213,7 @@ namespace AutoUpdater
                     try { mutex.ReleaseMutex(); } catch { }
                 }
                 if (mutex != null) mutex.Dispose();
+                if (watchdog != null) watchdog.Dispose();
             }
         }
 

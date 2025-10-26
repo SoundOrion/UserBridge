@@ -138,8 +138,15 @@ namespace UserBridge.Core
                     : INFINITE;
 
                 uint w = WaitForSingleObject(pi.hProcess, ms);
+                //if (w == WAIT_TIMEOUT)
+                //    throw new TimeoutException("ユーザー側プロセスがタイムアウトしました。");
                 if (w == WAIT_TIMEOUT)
-                    throw new TimeoutException("ユーザー側プロセスがタイムアウトしました。");
+                {
+                    var timeoutExitCode = 6;
+                    TerminateProcess(pi.hProcess, (uint)timeoutExitCode);
+                    WaitForSingleObject(pi.hProcess, 30_000); // 念のため終了待ち
+                    return timeoutExitCode;
+                }
 
                 if (w == WAIT_FAILED)
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "WaitForSingleObject");
