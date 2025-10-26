@@ -97,10 +97,11 @@ namespace AutoUpdater
                     // 必要に応じて引数を組み立て
                     string currentExe = Process.GetCurrentProcess().MainModule.FileName;
                     string clientArgs = $"--client {SECRET_TOKEN}";
+                    string commandLine = $"\"{currentExe}\" {clientArgs}";
 
                     // 自分自身をユーザーのアクティブセッションで起動
                     _exitCode = ProcessLauncher.RunForActiveUserAndWait(
-                        $"\"{currentExe}\" {clientArgs}", 
+                        commandLine, 
                         Path.GetDirectoryName(currentExe),
                         TimeSpan.FromMinutes(15));
 
