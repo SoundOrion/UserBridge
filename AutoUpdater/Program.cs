@@ -45,6 +45,11 @@ namespace AutoUpdater
         private const string EVENT_SOURCE = "BridgeExec";
         private const string EVENT_LOG = "Application";
 
+        /// <summary>
+        /// 固定トークン（GUIDなど何でもよい）
+        /// </summary>
+        private const string SECRET_TOKEN = "B7F2D5C4-AD19-4F52-A3DE-ABFA11C7E8F5";
+
         static int Main(string[] args)
         {
             if (args.Length > 0 && args[0] == "--client")
@@ -87,7 +92,7 @@ namespace AutoUpdater
                 {
                     // 必要に応じて引数を組み立て
                     string currentExe = Process.GetCurrentProcess().MainModule.FileName;
-                    string clientArgs = "--client \"hello\" 42";
+                    string clientArgs = $"--client {SECRET_TOKEN}";
 
                     // 自分自身をユーザーのアクティブセッションで起動
                     _exitCode = ProcessLauncher.RunForActiveUserAndWait(
@@ -128,6 +133,12 @@ namespace AutoUpdater
         /// <returns></returns>
         static int UserEntryPoint(string[] args)
         {
+            if (args.Length < 1 || args[0] != SECRET_TOKEN)
+            {
+                LogError("不正な起動。認証トークンが一致しません。");
+                return EXIT_ACCESS_DENIED;
+            }
+
             Timer watchdog = new Timer(_ =>
             {
                 try { LogError("Watchdog timeout (10min). 強制終了"); } catch { }
