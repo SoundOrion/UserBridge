@@ -1,0 +1,32 @@
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+class ServiceCreatePermissionCheck
+{
+    private const uint SC_MANAGER_CONNECT           = 0x0001;
+    private const uint SC_MANAGER_CREATE_SERVICE    = 0x0002;
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr OpenSCManager(string machineName, string databaseName, uint dwDesiredAccess);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool CloseServiceHandle(IntPtr hSCObject);
+
+    public static bool CanRegisterService()
+    {
+        IntPtr scm = OpenSCManager(null, null, SC_MANAGER_CREATE_SERVICE | SC_MANAGER_CONNECT);
+        if (scm == IntPtr.Zero)
+        {
+            int err = Marshal.GetLastWin32Error();
+            if (err == 5) // ERROR_ACCESS_DENIED
+                return false;
+
+            // 他の失敗理由は必要に応じて投げる
+            throw new Win32Exception(err);
+        }
+
+        CloseServiceHandle(scm);
+        return true;
+    }
+}
