@@ -343,6 +343,9 @@ namespace UserBridge
             }
             finally { WTSFreeMemory(pInfo); }
 
+            if (candidates.Count == 0)
+                throw new InvalidOperationException("起動候補となるユーザーセッションが見つかりません。");
+
             // 物理コンソールセッションを最優先（存在して候補に含まれていれば先頭へ）
             uint consoleSid = WTSGetActiveConsoleSessionId();
             if (consoleSid != 0xFFFFFFFF)
