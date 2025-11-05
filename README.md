@@ -44,6 +44,86 @@ if (si.State == WTSActive || si.State == WTSConnected || si.State == WTSDisconne
 
 
 
+はい、これで目的（切断状態含むユーザーセッションで起動）がきちんと実現できています。
+優先度付け→`WTSQueryUserToken`試行→成功したセッションに対して `DuplicateTokenEx`→`CreateProcessAsUser` の流れも問題なし。`finally` でのクリーンアップもOKです。
+
+仕上げに、実運用でハマりやすい“ちょい改善”をいくつかだけ置いておきます（任意）。
+
+## ちょい改善（任意）
+
+1. **AdjustTokenPrivileges の “割り当て失敗” を検知**
+   このAPIは成功を返しても、特権が割り当てられていないケースがあります（`ERROR_NOT_ALL_ASSIGNED=1300`）。ログに出すとデバッグが楽です。
+
+```csharp
+static void EnablePrivilege(string name)
+{
+    if (!OpenProcessToken(Process.GetCurrentProcess().Handle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out var hTok))
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "OpenProcessToken");
+    try
+    {
+        if (!LookupPrivilegeValue(null, name, out var luid))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "LookupPrivilegeValue " + name);
+
+        var tp = new TOKEN_PRIVILEGES { PrivilegeCount = 1, Luid = luid, Attributes = SE_PRIVILEGE_ENABLED };
+        if (!AdjustTokenPrivileges(hTok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "AdjustTokenPrivileges " + name);
+
+        int last = Marshal.GetLastWin32Error();
+        if (last == 1300) // ERROR_NOT_ALL_ASSIGNED
+            throw new System.ComponentModel.Win32Exception(last, $"Privilege not assigned: {name}");
+    }
+    finally { CloseHandle(hTok); }
+}
+```
+
+2. **`CreateEnvironmentBlock` 失敗時のフォールバック**（必要なら）
+   ユーザー環境が不要なら環境ブロック無しで起動するオプションも。
+
+```csharp
+if (!CreateEnvironmentBlock(out env, primary, false))
+{
+    int err = Marshal.GetLastWin32Error();
+    try { EventLog.WriteEntry("BridgeExec", $"CreateEnvironmentBlock 失敗: {err}。環境なしで起動を試みます。", EventLogEntryType.Warning); } catch { }
+    env = IntPtr.Zero; // フォールバック
+}
+```
+
+3. **32bit サービスで System32 を叩く場合**
+   プロセスが x86 だと `System32` が `SysWOW64` にリダイレクトされます。確実に 64bit 側の cscript を使いたいなら `Sysnative` を使います（x86ビルド時のみ検討）。
+
+```csharp
+string systemRoot = Environment.GetEnvironmentVariable("SystemRoot");
+string cscript = Environment.Is64BitProcess
+    ? $@"{systemRoot}\System32\cscript.exe"
+    : $@"{systemRoot}\Sysnative\cscript.exe"; // x86 → 64bit System32 を指す
+```
+
+4. **（好み）切断セッションを最優先にする**
+   もし「Disconnected を最優先で拾いたい」要件なら、優先度関数の順番を入れ替えるだけです。
+
+```csharp
+// Disconnected → Active → Connected
+int StatePriority(int state)
+{
+    switch (state)
+    {
+        case WTSDisconnected: return 0;
+        case WTSActive:       return 1;
+        case WTSConnected:    return 2;
+        default:              return 99;
+    }
+}
+```
+
+5. **値タプルの互換性**
+   古い .NET Framework でビルドする場合は `System.ValueTuple` の NuGet が必要になることがあります（ビルドエラーが出たら追加）。
+
+---
+
+### まとめ
+
+* 今のコードで **Active/Connected/Disconnected** のいずれでもトークン取得→起動できる構成になっていてOK。
+* 上の改善は“保守性と現場デバッグ”を少し上げるためのオプションです。必要なものだけ取り入れてください。
 
 
 
