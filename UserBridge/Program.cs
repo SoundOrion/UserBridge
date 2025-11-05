@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Threading;
@@ -148,7 +150,22 @@ namespace UserBridge
         /// </summary>
         [StructLayout(LayoutKind.Sequential)]
         struct WTS_SESSION_INFO { public uint SessionID; public IntPtr pWinStationName; public int State; }
+
+        // 物理コンソールのセッション ID を取得
+        [DllImport("kernel32.dll")]
+        static extern uint WTSGetActiveConsoleSessionId();
+
+        // WTS_CONNECTSTATE_CLASS の値（読みやすさのため）
         const int WTSActive = 0; // enum WTS_CONNECTSTATE_CLASS
+        const int WTSConnected = 1;
+        const int WTSConnectQuery = 2;
+        const int WTSShadow = 3;
+        const int WTSDisconnected = 4;
+        const int WTSIdle = 5;
+        const int WTSListen = 6;
+        const int WTSReset = 7;
+        const int WTSDown = 8;
+        const int WTSInit = 9;
 
         /// <summary>
         /// CreateProcess 系 API に渡す STARTUPINFO を表します。
@@ -300,29 +317,88 @@ namespace UserBridge
             EnablePrivilege(SE_ASSIGNPRIMARYTOKEN_NAME);
             EnablePrivilege(SE_INCREASE_QUOTA_NAME);
 
-            // 2) アクティブなユーザーセッションを探す（RDP含む）
+            // 2) 起動候補となるユーザーセッションを収集（Active / Connected / Disconnected）
             if (!WTSEnumerateSessions(IntPtr.Zero, 0, 1, out var pInfo, out var count))
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "WTSEnumerateSessions");
-            uint targetSid = 0xFFFFFFFF;
+
+            // 状態と一緒に保持して優先度付けできるようにする
+            var candidates = new List<(uint sid, int state)>();
             try
             {
                 int size = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
                 for (int i = 0; i < count; i++)
                 {
                     var si = Marshal.PtrToStructure<WTS_SESSION_INFO>(pInfo + i * size);
-                    if (si.State == WTSActive) { targetSid = si.SessionID; break; }
+
+                    // サービスの session 0 は基本除外（必要なら条件を調整）
+                    if (si.SessionID == 0)
+                        continue;
+
+                    // 起動候補に含める状態を列挙
+                    if (si.State == WTSActive || si.State == WTSConnected || si.State == WTSDisconnected)
+                    {
+                        candidates.Add((si.SessionID, si.State));
+                    }
                 }
             }
             finally { WTSFreeMemory(pInfo); }
 
-            if (targetSid == 0xFFFFFFFF)
-                throw new InvalidOperationException("アクティブなユーザーセッションが見つかりません。");
+            // 物理コンソールセッションを最優先（存在して候補に含まれていれば先頭へ）
+            uint consoleSid = WTSGetActiveConsoleSessionId();
+            if (consoleSid != 0xFFFFFFFF)
+            {
+                int idx = candidates.FindIndex(c => c.sid == consoleSid);
+                if (idx >= 0)
+                {
+                    var c = candidates[idx];
+                    candidates.RemoveAt(idx);
+                    candidates.Insert(0, c);
+                }
+            }
 
-            // 3) そのセッションのユーザートークン取得
-            if (!WTSQueryUserToken(targetSid, out var userToken))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "WTSQueryUserToken");
+            // 状態ごとの優先度（小さいほど優先）
+            int StatePriority(int state)
+            {
+                switch (state)
+                {
+                    case WTSActive: return 0; // 最優先：アクティブ
+                    case WTSConnected: return 1; // 次点：接続済み
+                    case WTSDisconnected: return 2; // 切断済み
+                    default: return 99;
+                }
+            }
 
-            Console.WriteLine($"実行ユーザー: {GetUserFromToken(userToken)}");
+            // 同一セッションの重複を排除しつつ優先度で整列
+            candidates = candidates
+                .GroupBy(c => c.sid)
+                .Select(g => g.First())            // 同一 sid は最初のものを採用
+                .OrderBy(c => StatePriority(c.state))
+                .ToList();
+
+            // 3) 候補を上から順にトークン取得を試す
+            IntPtr userToken = IntPtr.Zero;
+            uint selectedSid = 0xFFFFFFFF;
+
+            foreach (var c in candidates)
+            {
+                if (WTSQueryUserToken(c.sid, out userToken))
+                {
+                    selectedSid = c.sid;
+                    break;
+                }
+                else
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    try { EventLog.WriteEntry("BridgeExec", $"WTSQueryUserToken 失敗: Session={c.sid}, State={c.state}, Error={err}", EventLogEntryType.Warning); } catch { }
+                }
+            }
+
+            // 取得できなければ終了
+            if (userToken == IntPtr.Zero || selectedSid == 0xFFFFFFFF)
+                throw new InvalidOperationException("ユーザーセッションのトークン取得に失敗しました（Active/Connected/Disconnected いずれも不可）。");
+
+            // （参考）誰のトークンか出力
+            Console.WriteLine($"ターゲットセッション: {selectedSid} / 実行ユーザー: {GetUserFromToken(userToken)}");
 
             IntPtr primary = IntPtr.Zero, env = IntPtr.Zero;
             PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
