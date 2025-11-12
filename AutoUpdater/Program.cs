@@ -10,66 +10,60 @@ using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Text;
 using System.IO.Compression;
+using System.Runtime.InteropServices;
 using UserBridge.Core;
 
 namespace AutoUpdater
 {
     internal class Program
     {
-        // プログラム終了コード一覧
-        private const int EXIT_SUCCESS = 0;  // 正常終了
-        private const int EXIT_ACCESS_DENIED = 1;  // 権限エラー
-        private const int EXIT_RUNTIME_ERROR = 2;  // 実行時エラー
-
-        // 一般的なエラー
-        private const int EXIT_INVALID_ARGUMENT = 3;  // 引数不正
-        private const int EXIT_FILE_NOT_FOUND = 4;  // ファイルが見つからない
-        private const int EXIT_IO_ERROR = 5;  // 入出力エラー
-        private const int EXIT_TIMEOUT = 6;  // タイムアウト
-        private const int EXIT_NETWORK_ERROR = 7;  // ネットワークエラー
-        private const int EXIT_DATABASE_ERROR = 8;  // データベースエラー
-        private const int EXIT_CONFIG_ERROR = 9;  // 設定ファイル不正
-
-        // システム系
-        private const int EXIT_OUT_OF_MEMORY = 10; // メモリ不足
-        private const int EXIT_UNHANDLED_EXCEPTION = 11; // 予期せぬ例外
-        private const int EXIT_DEPENDENCY_MISSING = 12; // 依存関係不足
-        private const int EXIT_VERSION_MISMATCH = 13; // バージョン不一致
-
-        // アプリケーション固有
-        private const int EXIT_USER_CANCELLED = 20; // ユーザー操作による中断
-        private const int EXIT_VALIDATION_FAILED = 21; // 入力検証エラー
-        private const int EXIT_SERVICE_UNAVAILABLE = 22; // サービス利用不可
+        // ===== プログラム終了コード =====
+        private const int EXIT_SUCCESS = 0;                 // 正常終了
+        private const int EXIT_ACCESS_DENIED = 1;           // 権限エラー
+        private const int EXIT_RUNTIME_ERROR = 2;           // 実行時エラー
+        private const int EXIT_INVALID_ARGUMENT = 3;        // 引数不正
+        private const int EXIT_FILE_NOT_FOUND = 4;          // ファイルが見つからない
+        private const int EXIT_IO_ERROR = 5;                // 入出力エラー
+        private const int EXIT_TIMEOUT = 6;                 // タイムアウト
+        private const int EXIT_NETWORK_ERROR = 7;           // ネットワークエラー
+        private const int EXIT_DATABASE_ERROR = 8;          // データベースエラー
+        private const int EXIT_CONFIG_ERROR = 9;            // 設定ファイル不正
+        private const int EXIT_OUT_OF_MEMORY = 10;          // メモリ不足
+        private const int EXIT_UNHANDLED_EXCEPTION = 11;    // 予期せぬ例外
+        private const int EXIT_DEPENDENCY_MISSING = 12;     // 依存関係不足
+        private const int EXIT_VERSION_MISMATCH = 13;       // バージョン不一致
+        private const int EXIT_USER_CANCELLED = 20;         // ユーザー中断
+        private const int EXIT_VALIDATION_FAILED = 21;      // 入力検証エラー
+        private const int EXIT_SERVICE_UNAVAILABLE = 22;    // サービス利用不可
 
         private static int _exitCode = EXIT_UNHANDLED_EXCEPTION;
-        private const string EVENT_SOURCE = "BridgeExec";
+
+        private const string EVENT_SOURCE = "AutoUpdater";
         private const string EVENT_LOG = "Application";
 
-        private static readonly TimeSpan WATCHDOG_TIMEOUT = TimeSpan.FromMinutes(10);
+        // 既定 3分（設定で上書き可）
+        private static TimeSpan WATCHDOG_TIMEOUT = TimeSpan.FromMinutes(3);
+        private static CancellationTokenSource _watchdogCts;
 
-        /// <summary>
-        /// 固定トークン（GUIDなど何でもよい）
-        /// </summary>
-        private static readonly string SECRET_TOKEN =
-            Convert.ToBase64String(SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes("B7F2D5C4-AD19-4F52-A3DE-ABFA11C7E8F5")));
+        // 起動ごとのワンタイムトークンを Mutex で検証
+        private static string _launchToken; // サービス側が生成
+        private static string TokenMutexName(string token) => @"Global\AutoUpdater.Token." + token;
 
+        // MoveFileEx (再起動時削除) オプション
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, int dwFlags);
+        private const int MOVEFILE_DELAY_UNTIL_REBOOT = 0x4;
 
+        // ========== エントリポイント ==========
         static int Main(string[] args)
         {
-            if (args.Length > 0 && args[0] == "--client")
-            {
-                // ===== ユーザーセッション側で実行する処理 =====
-                _exitCode = UserEntryPoint(args.Skip(1).ToArray());
-                return _exitCode;
-            }
-
-            AppDomain.CurrentDomain.UnhandledException += delegate (object s, UnhandledExceptionEventArgs e)
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             {
                 try { SafeLogEvent("未処理例外: " + e.ExceptionObject, EventLogEntryType.Error); } catch { }
                 _exitCode = EXIT_RUNTIME_ERROR;
             };
 
-            TaskScheduler.UnobservedTaskException += delegate (object s, UnobservedTaskExceptionEventArgs e)
+            TaskScheduler.UnobservedTaskException += (s, e) =>
             {
                 e.SetObserved();
                 try { SafeLogEvent("未監視タスク例外: " + e.Exception, EventLogEntryType.Error); } catch { }
@@ -78,93 +72,83 @@ namespace AutoUpdater
 
             try
             {
-                using (WindowsIdentity id = WindowsIdentity.GetCurrent())
+                if (args.Length > 0 && string.Equals(args[0], "--client", StringComparison.OrdinalIgnoreCase))
                 {
-                    WindowsPrincipal principal = new WindowsPrincipal(id);
-                    bool isSystem = (id.User != null && id.User.IsWellKnown(WellKnownSidType.LocalSystemSid));
-                    bool isAdmin = principal.IsInRole(WindowsBuiltInRole.Administrator);
-                    if (!(isSystem || isAdmin))
-                    {
-                        LogError("Access denied: 実行ユーザー=" + id.Name);
-                        _exitCode = EXIT_ACCESS_DENIED;
-                        return _exitCode;
-                    }
+                    return UserEntryPoint(args.Skip(1).ToArray());
                 }
 
-                // ===== サービス側（SYSTEM/管理者）で動く処理 =====
-                try
+                // ===== サービス側（SYSTEM/管理者） =====
+                if (!EnsureElevatedOrSystem())
                 {
-                    // 必要に応じて引数を組み立て
-                    string currentExe = Process.GetCurrentProcess().MainModule.FileName;
-                    string clientArgs = $"--client {SECRET_TOKEN}";
-                    string commandLine = $"\"{currentExe}\" {clientArgs}";
-
-                    // 自分自身をユーザーのアクティブセッションで起動
-                    _exitCode = ProcessLauncher.RunForActiveUserAndWait(
-                        commandLine, 
-                        Path.GetDirectoryName(currentExe),
-                        TimeSpan.FromMinutes(15));
-
-                    if (_exitCode == EXIT_SUCCESS)
-                    {
-                        Log("ユーザー側処理 成功");
-                    }
-                    else
-                    {
-                        SafeLogEvent($"ユーザー側処理 失敗: ExitCode={_exitCode}", EventLogEntryType.Error);
-                    }
-
-                    return _exitCode;
+                    LogError("Access denied: 管理者または LocalSystem で実行してください。");
+                    return _exitCode = EXIT_ACCESS_DENIED;
                 }
-                catch (Exception ex)
+
+                var currentExe = Process.GetCurrentProcess().MainModule!.FileName!;
+                _launchToken = CreateOneTimeToken();
+
+                // トークン検証用 Mutex を作成（ACL制限）
+                using var tokenGate = CreateGlobalMutex(TokenMutexName(_launchToken));
+                if (tokenGate == null)
                 {
-                    SafeLogEvent("RunForActiveUser 実行エラー: " + ex, EventLogEntryType.Error);
-                    _exitCode = EXIT_RUNTIME_ERROR;
-                    return _exitCode;
+                    SafeLogEvent("トークン用 Mutex の作成に失敗", EventLogEntryType.Error);
+                    return _exitCode = EXIT_RUNTIME_ERROR;
                 }
+
+                var clientArgs = $"--client {_launchToken}";
+                var commandLine = $"\"{currentExe}\" {clientArgs}";
+
+                _exitCode = ProcessLauncher.RunForActiveUserAndWait(
+                    commandLine,
+                    Path.GetDirectoryName(currentExe)!,
+                    TimeSpan.FromMinutes(15));
+
+                if (_exitCode == EXIT_SUCCESS)
+                {
+                    Log("ユーザー側処理 成功");
+                }
+                else
+                {
+                    SafeLogEvent($"ユーザー側処理 失敗: ExitCode={_exitCode}", EventLogEntryType.Error);
+                }
+
+                return _exitCode;
             }
             catch (Exception ex)
             {
                 SafeLogEvent("実行エラー: " + ex, EventLogEntryType.Error);
-                _exitCode = EXIT_RUNTIME_ERROR;
-                return _exitCode;
+                return _exitCode = EXIT_RUNTIME_ERROR;
             }
         }
 
-        /// <summary>
-        /// ユーザーセッション側の呼びたいメソッド
-        /// </summary>
-        /// <param name="args"></param>
-        /// <returns></returns>
+        // ========== ユーザーセッション側 ==========
         static int UserEntryPoint(string[] args)
         {
-            if (args.Length < 1 || args[0] != SECRET_TOKEN)
-            {
-                LogError("不正な起動。認証トークンが一致しません。");
-                return EXIT_ACCESS_DENIED;
-            }
-
-            Timer watchdog = new Timer(_ =>
-            {
-                try { LogError("Watchdog timeout (10min). 強制終了"); } catch { }
-                try { Environment.FailFast("Watchdog timeout"); } catch { Process.GetCurrentProcess().Kill(); }
-            }, null, WATCHDOG_TIMEOUT, Timeout.InfiniteTimeSpan);
-
-            Mutex mutex = null;
-            bool hasLock = false;
-
             try
             {
-                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "AutoUpdater.config");
+                if (args.Length < 1)
+                {
+                    LogError("不正な起動。トークン未指定。");
+                    return EXIT_ACCESS_DENIED;
+                }
+                var token = args[0];
+
+                // サービス側が作ったトークン Mutex が存在するかで検証
+                if (!ValidateTokenWithMutex(token))
+                {
+                    LogError("不正な起動。認証トークンが一致しません。");
+                    return EXIT_ACCESS_DENIED;
+                }
+
+                // 設定ファイル
+                var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "AutoUpdater.config");
                 if (!File.Exists(configPath))
                 {
                     LogError("設定ファイルが見つかりません: " + configPath);
-                    _exitCode = EXIT_FILE_NOT_FOUND;
-                    return _exitCode;
+                    return EXIT_FILE_NOT_FOUND;
                 }
 
-                ExeConfigurationFileMap fileMap = new ExeConfigurationFileMap();
-                fileMap.ExeConfigFilename = configPath;
+                var fileMap = new ExeConfigurationFileMap { ExeConfigFilename = configPath };
                 Configuration config;
                 try
                 {
@@ -173,90 +157,80 @@ namespace AutoUpdater
                 catch (ConfigurationErrorsException cex)
                 {
                     LogError("設定ファイル読み込みエラー: " + cex.Message);
-                    _exitCode = EXIT_CONFIG_ERROR;
-                    return _exitCode;
+                    return EXIT_CONFIG_ERROR;
                 }
 
-                string sourceZip = config.AppSettings.Settings["SourceZip"] != null ? config.AppSettings.Settings["SourceZip"].Value : null;
-                string targetDir = config.AppSettings.Settings["TargetDir"] != null ? config.AppSettings.Settings["TargetDir"].Value : null;
-                string exeNamesRaw = config.AppSettings.Settings["ExeNames"] != null ? config.AppSettings.Settings["ExeNames"].Value : null;
+                // ウォッチドッグ（既定3分、設定 WatchdogSeconds=10〜600 なら上書き）
+                WATCHDOG_TIMEOUT = LoadWatchdogTimeoutFromConfig(config);
+                StartWatchdog(WATCHDOG_TIMEOUT);
 
-                string[] exeNames = (exeNamesRaw ?? "").Split(',').Select(x => x.Trim()).Where(x => x != "").ToArray();
+                // 設定読み込み（堅牢化）
+                var sourceZip = GetRequiredSetting(config, "SourceZip");
+                var targetDir = GetRequiredSetting(config, "TargetDir");
+                var exeNamesRaw = GetRequiredSetting(config, "ExeNames");
 
-                System.Collections.Generic.List<string> missing = new System.Collections.Generic.List<string>();
-                if (string.IsNullOrWhiteSpace(sourceZip)) missing.Add("SourceZip");
-                if (string.IsNullOrWhiteSpace(targetDir)) missing.Add("TargetDir");
-                if (exeNames.Length == 0) missing.Add("ExeNames");
-                if (missing.Count > 0)
+                if (sourceZip == null || targetDir == null || exeNamesRaw == null)
                 {
-                    LogError("設定値が不足: " + string.Join(", ", missing.ToArray()));
-                    _exitCode = EXIT_CONFIG_ERROR;
-                    return _exitCode;
+                    LogError("設定値が不足: SourceZip/TargetDir/ExeNames は必須です。");
+                    return EXIT_CONFIG_ERROR;
                 }
 
-                string mutexName = MakeGlobalMutexName(targetDir);
-                mutex = CreateGlobalMutex(mutexName);
+                sourceZip = sourceZip.Trim();
+                targetDir = targetDir.Trim();
 
-                if (mutex == null)
+                // セパレータ/空白/セミコロン対応
+                var exeNames = exeNamesRaw
+                    .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(x => x.Trim())
+                    .Where(x => x.Length > 0)
+                    .ToArray();
+
+                if (exeNames.Length == 0)
                 {
-                    LogError("ミューテックス作成に失敗: " + mutexName);
-                    _exitCode = EXIT_RUNTIME_ERROR;
-                    return _exitCode;
+                    LogError("ExeNames が空です。");
+                    return EXIT_CONFIG_ERROR;
                 }
 
-                try
+                // 絶対パス確認
+                if (!Path.IsPathRooted(sourceZip) || !Path.IsPathRooted(targetDir))
                 {
-                    if (!mutex.WaitOne(TimeSpan.Zero))
-                    {
-                        LogError("別のインスタンスが実行中のため中断します。");
-                        _exitCode = EXIT_SERVICE_UNAVAILABLE;
-                        return _exitCode;
-                    }
-                    hasLock = true;
+                    LogError("SourceZip/TargetDir は絶対パスで指定してください。");
+                    return EXIT_CONFIG_ERROR;
                 }
-                catch (AbandonedMutexException)
+
+                // 誤設定防止: sourceZip が targetDir 配下は不可
+                if (IsSubPathOf(Path.GetDirectoryName(sourceZip)!, targetDir))
                 {
-                    // 前回異常終了などでミューテックスが放棄されていた場合
-                    Log("前回の実行が異常終了していました。ロックを引き継いで続行します。");
-                    hasLock = true;
+                    LogError("誤設定: SourceZip が TargetDir 配下です。自己削除の恐れがあるため禁止。");
+                    return EXIT_CONFIG_ERROR;
                 }
 
-                // ここから実際の処理
-
-                // フォルダの存在だけチェック
+                // 存在チェック
                 if (!Directory.Exists(targetDir))
                 {
-                    LogError("対象フォルダが存在しないため、処理を行いません。");
-                    _exitCode = EXIT_FILE_NOT_FOUND;
-                    return _exitCode;
+                    LogError("対象フォルダが存在しません: " + targetDir);
+                    return EXIT_FILE_NOT_FOUND;
                 }
-
-                // 元ZIPは必須（ここは従来どおり）
                 if (!File.Exists(sourceZip))
                 {
-                    LogError("元ZIP が見つからないため、処理を行いません。");
-                    _exitCode = EXIT_FILE_NOT_FOUND;
-                    return _exitCode;
+                    LogError("元ZIP が見つかりません: " + sourceZip);
+                    return EXIT_FILE_NOT_FOUND;
                 }
 
-                var targetZip = Path.Combine(targetDir, Path.GetFileName(sourceZip));
                 var exePaths = exeNames.Select(n => Path.Combine(targetDir, n)).ToArray();
+                var targetZip = Path.Combine(targetDir, Path.GetFileName(sourceZip));
 
-                // 任意：プロセス稼働チェック（安全のため維持）
-                if (IsAnyProcessRunning(exePaths))
+                // 稼働中（ロック）判定
+                if (IsAnyTargetLocked(exePaths))
                 {
-                    LogError("対象の実行ファイルに対応するプロセスが稼働中のため、処理を行いません。");
-                    _exitCode = EXIT_RUNTIME_ERROR;
-                    return _exitCode;
+                    LogError("対象実行ファイルがロック中のため中断します。");
+                    return EXIT_RUNTIME_ERROR;
                 }
 
-                // --- 更新要否の判定 ---
+                // 新旧比較
+                var srcZipTimeUtc = File.GetLastWriteTimeUtc(sourceZip);
                 bool dirEmpty = IsDirectoryEmpty(targetDir);
                 bool hasTargetZip = File.Exists(targetZip);
-
-                var srcZipTimeUtc = File.GetLastWriteTimeUtc(sourceZip);
-
-                // 対象側の「新しさ」＝(a) 対象側ZIPの時刻, (b) 対象フォルダ配下ファイルの最終更新時刻 の最大
                 DateTime? targetZipTimeUtc = hasTargetZip ? File.GetLastWriteTimeUtc(targetZip) : (DateTime?)null;
                 var dirLatestUtc = GetDirectoryLatestWriteTimeUtc(targetDir);
                 var baselineUtc = MaxUtc(targetZipTimeUtc ?? DateTime.MinValue, dirLatestUtc ?? DateTime.MinValue);
@@ -265,50 +239,89 @@ namespace AutoUpdater
                 Log($"対象側基準(UTC): {baselineUtc:O}");
                 Log($"対象フォルダは空?: {dirEmpty}, 対象側ZIPあり?: {hasTargetZip}");
 
-                // ① フォルダが空 → 更新
-                // ② 対象側ZIPが無い → 更新
-                // ③ 上記以外 → 元ZIPが基準より新しければ更新
                 bool shouldReplace = dirEmpty || !hasTargetZip || srcZipTimeUtc > baselineUtc;
-
                 if (!shouldReplace)
                 {
-                    Log("更新の必要がないため、差し替えは行いません。");
-                    _exitCode = EXIT_SUCCESS;
-                    return _exitCode;
+                    Log("更新の必要がないため差し替えは行いません。");
+                    return EXIT_SUCCESS;
                 }
 
-                // クリティカル区間直前の再チェック
-                if (IsAnyProcessRunning(exePaths))
+                // クリティカル直前の再ロックチェック
+                if (IsAnyTargetLocked(exePaths))
                 {
-                    LogError("チェック後に対象のプロセスが稼働開始したため、中断します。");
-                    _exitCode = EXIT_RUNTIME_ERROR;
-                    return _exitCode;
+                    LogError("チェック後に実行ファイルがロックされたため中断します。");
+                    return EXIT_RUNTIME_ERROR;
                 }
 
-                // --- 差し替え ---
-                if (!ReplaceFolderWithZipSafe(sourceZip, targetDir, Path.GetFileName(sourceZip), exePaths))
-                {
-                    _exitCode = EXIT_RUNTIME_ERROR;
-                    return _exitCode;
-                }
+                // 差し替え実行（ステージング→アトミックスワップ）
+                int rc = ReplaceFolderWithZipSafe(sourceZip, targetDir, Path.GetFileName(sourceZip), exePaths)
+                    ? EXIT_SUCCESS
+                    : EXIT_RUNTIME_ERROR;
 
-                _exitCode = EXIT_SUCCESS;
-                return _exitCode;
+                return rc;
+            }
+            catch (OperationCanceledException)
+            {
+                LogError($"Watchdog timeout ({WATCHDOG_TIMEOUT}). 中断します。");
+                return EXIT_TIMEOUT;
             }
             catch (Exception ex)
             {
-                LogError("実行エラー: " + ex.ToString());
-                _exitCode = EXIT_RUNTIME_ERROR;
-                return _exitCode;
+                LogError("実行エラー: " + ex);
+                return EXIT_RUNTIME_ERROR;
             }
             finally
             {
-                if (hasLock && mutex != null)
-                {
-                    try { mutex.ReleaseMutex(); } catch { }
-                }
-                if (mutex != null) mutex.Dispose();
-                if (watchdog != null) watchdog.Dispose();
+                _watchdogCts?.Dispose();
+            }
+        }
+
+        // ===== 共通ユーティリティ =====
+
+        static bool EnsureElevatedOrSystem()
+        {
+            try
+            {
+                using var id = WindowsIdentity.GetCurrent();
+                var principal = new WindowsPrincipal(id);
+                bool isSystem = (id.User != null && id.User.IsWellKnown(WellKnownSidType.LocalSystemSid));
+                bool isAdmin = principal.IsInRole(WindowsBuiltInRole.Administrator);
+                return isSystem || isAdmin;
+            }
+            catch { return false; }
+        }
+
+        static void StartWatchdog(TimeSpan timeout)
+        {
+            _watchdogCts = new CancellationTokenSource(timeout);
+        }
+        static void CheckCancel() => _watchdogCts?.Token.ThrowIfCancellationRequested();
+
+        static TimeSpan LoadWatchdogTimeoutFromConfig(Configuration config)
+        {
+            var v = config.AppSettings.Settings["WatchdogSeconds"]?.Value;
+            if (int.TryParse(v, out var sec) && sec >= 10 && sec <= 600) // 10〜600秒に制限
+                return TimeSpan.FromSeconds(sec);
+            return TimeSpan.FromMinutes(3);
+        }
+
+        static string CreateOneTimeToken()
+        {
+            Span<byte> buf = stackalloc byte[32];
+            RandomNumberGenerator.Fill(buf);
+            return Convert.ToBase64String(buf);
+        }
+
+        static bool ValidateTokenWithMutex(string token)
+        {
+            try
+            {
+                using var m = Mutex.OpenExisting(TokenMutexName(token));
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -325,69 +338,37 @@ namespace AutoUpdater
 
         static void SafeLogEvent(string message, EventLogEntryType type)
         {
-            if (TryInitEventLog())
-            {
-                try { EventLog.WriteEntry(EVENT_SOURCE, message, type); } catch { }
-            }
-            //try
-            //{
-            //    string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "bridgeexec.log");
-            //    File.AppendAllText(path, string.Format("[{0:O} UTC] {1}: {2}{3}", DateTime.UtcNow, type, message, Environment.NewLine));
-            //}
-            //catch { }
-        }
-
-        static void Log(string message)
-        {
-            Console.WriteLine("[{0:O} UTC] {1}", DateTime.UtcNow, message);
-        }
-
-        static void LogError(string message)
-        {
-            Console.Error.WriteLine("[{0:O} UTC] {1}", DateTime.UtcNow, message);
-        }
-
-        static string MakeGlobalMutexName(string targetDir)
-        {
-            string full = Path.GetFullPath(targetDir).ToUpperInvariant();
-            using (SHA1 sha = SHA1.Create())
-            {
-                string hash = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(full))).Replace("-", "");
-                return "Global\\ZipReplace48_" + hash.Substring(0, 24);
-            }
-        }
-
-        static Mutex CreateGlobalMutex(string name)
-        {
+            var wroteEvent = false;
             try
             {
-                var sid = new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null);
-                var rule = new MutexAccessRule(sid, MutexRights.FullControl, AccessControlType.Allow);
-                var sec = new MutexSecurity();
-                sec.AddAccessRule(rule);
+                if (TryInitEventLog())
+                {
+                    EventLog.WriteEntry(EVENT_SOURCE, message, type);
+                    wroteEvent = true;
+                }
+            }
+            catch { /* ignore */ }
 
-                bool createdNew;
-                return new Mutex(false, name, out createdNew, sec);
+            try
+            {
+                string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "autoupdater.log");
+                File.AppendAllText(path, $"[{DateTime.UtcNow:O} UTC] {type}: {message}{Environment.NewLine}");
             }
-            catch 
-            { 
-                return null; 
-            }
+            catch { if (!wroteEvent) { /* どうにもならない */ } }
         }
 
+        static void Log(string message) =>
+            Console.WriteLine("[{0:O} UTC] {1}", DateTime.UtcNow, message);
+        static void LogError(string message) =>
+            Console.Error.WriteLine("[{0:O} UTC] {1}", DateTime.UtcNow, message);
 
+        static string GetRequiredSetting(Configuration cfg, string key) =>
+            cfg.AppSettings.Settings[key]?.Value;
 
         static bool IsDirectoryEmpty(string path)
         {
-            try
-            {
-                return !Directory.EnumerateFileSystemEntries(path).Any();
-            }
-            catch
-            {
-                // アクセスできない場合は保守的に「空ではない」とみなす
-                return false;
-            }
+            try { return !Directory.EnumerateFileSystemEntries(path).Any(); }
+            catch { return false; }
         }
 
         static DateTime? GetDirectoryLatestWriteTimeUtc(string path)
@@ -399,6 +380,7 @@ namespace AutoUpdater
                 bool any = false;
                 foreach (var f in files)
                 {
+                    CheckCancel();
                     DateTime t;
                     try { t = File.GetLastWriteTimeUtc(f); }
                     catch { continue; }
@@ -407,63 +389,50 @@ namespace AutoUpdater
                 }
                 return any ? latest : (DateTime?)null;
             }
-            catch
-            {
-                // 取れなければ「なし」
-                return null;
-            }
+            catch { return null; }
         }
         static DateTime MaxUtc(DateTime a, DateTime b) => a >= b ? a : b;
-        // exe のフルパスに紐づけて稼働判定（名前衝突を避ける）
-        // アクセスできないケースは保守的に「稼働中とみなす」
-        static bool IsAnyProcessRunning(string[] fullExePaths)
+
+        static bool IsAnyTargetLocked(string[] paths)
         {
-            var targets = fullExePaths
-                .Select(p => new { Name = Path.GetFileNameWithoutExtension(p), Path = NormalizeFullPath(p) })
-                .Where(x => !string.IsNullOrWhiteSpace(x.Name))
-                .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase);
-
-            foreach (var g in targets)
+            foreach (var p in paths)
             {
-                Process[] procs = Array.Empty<Process>();
-                try { procs = Process.GetProcessesByName(g.Key); } catch { }
-
-                foreach (var p in procs)
+                CheckCancel();
+                try
                 {
-                    try
-                    {
-                        var exePath = p.MainModule?.FileName;
-                        if (exePath == null) return true; // 情報が取れない場合は保守的にtrue
-                        var exeNorm = NormalizeFullPath(exePath);
-                        foreach (var t in g)
-                            if (PathEquals(exeNorm, t.Path)) return true;
-                    }
-                    catch
-                    {
-                        return true; // アクセス失敗時も保守的にtrue
-                    }
-                    finally
-                    {
-                        try { p.Dispose(); } catch { }
-                    }
+                    using var fs = new FileStream(p, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                }
+                catch (FileNotFoundException)
+                {
+                    continue; // まだ存在しないのはOK
+                }
+                catch (IOException)
+                {
+                    return true; // ロック中
+                }
+                catch
+                {
+                    return true; // 権限等も保守的にロック扱い
                 }
             }
             return false;
         }
 
-        static string NormalizeFullPath(string path)
+        static bool IsSubPathOf(string child, string parent)
         {
-            var full = Path.GetFullPath(path);
-            // 末尾セパレータは削る（比較一貫性のため）
-            return full.TrimEnd(Path.DirectorySeparatorChar);
+            try
+            {
+                var a = Path.GetFullPath(child).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant();
+                var b = Path.GetFullPath(parent).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant();
+                return a.StartsWith(b + Path.DirectorySeparatorChar);
+            }
+            catch { return false; }
         }
 
-        static bool PathEquals(string a, string b) =>
-            string.Equals(NormalizeFullPath(a), NormalizeFullPath(b), StringComparison.OrdinalIgnoreCase);
+        // ===== 置換処理（ステージング＋アトミックスワップ） =====
 
         static bool ReplaceFolderWithZipSafe(string sourceZip, string targetDir, string zipFileName, string[] exePaths)
         {
-            // 一時展開先（安全に差し替えるため）
             var tempBase = Path.Combine(Path.GetTempPath(), "ZipReplace_" + Guid.NewGuid().ToString("N"));
             var tempExtract = Path.Combine(tempBase, "extract");
             var tempStage = Path.Combine(tempBase, "stage");
@@ -473,29 +442,33 @@ namespace AutoUpdater
 
             try
             {
-                // 安全に展開（Zip Slip / Zip Bomb 防止）
-                SafeExtractZip(sourceZip, tempExtract);
+                // Zip Slip + Zip Bomb 対策付き展開
+                SafeExtractZip(sourceZip, tempExtract,
+                    maxTotalBytes: 2L * 1024 * 1024 * 1024,     // 2GB
+                    maxEntryBytes: 512L * 1024 * 1024);         // 512MB/entry
 
-                // ステージングに ZIP 自体も置く（元の仕様どおり）
+                // ステージングに ZIP も配置（従来仕様）
                 Retry(() => File.Copy(sourceZip, Path.Combine(tempStage, zipFileName), overwrite: true));
 
                 // 展開物をステージングへコピー
                 CopyAll(new DirectoryInfo(tempExtract), new DirectoryInfo(tempStage));
 
-                // 直前再チェック（稼働開始を検知）
-                if (IsAnyProcessRunning(exePaths))
+                // 直前ロック再チェック
+                if (IsAnyTargetLocked(exePaths))
                 {
-                    Log("コピー直前にプロセスが稼働開始したため中断しました。");
+                    Log("コピー直前にロックが検知されたため中断しました。");
                     return false;
                 }
 
-                // 対象フォルダ内をクリア
-                ClearDirectory(targetDir);
-
-                // ステージング → 対象へコピー（Move ではなく Copy による上書き）
-                CopyAll(new DirectoryInfo(tempStage), new DirectoryInfo(targetDir));
+                // アトミックに入れ替え（失敗時はロールバック）
+                if (!AtomicSwap(targetDir, tempStage))
+                {
+                    LogError("アトミックスワップに失敗しました。");
+                    return false;
+                }
                 return true;
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 LogError("差し替え処理中にエラー: " + ex);
@@ -503,109 +476,166 @@ namespace AutoUpdater
             }
             finally
             {
-                TryDeleteDirectory(tempBase);
+                // 時間をかけないよう非同期削除（少し待つとロック解除されやすい）
+                Task.Run(() =>
+                {
+                    Thread.Sleep(2000);
+                    try { TryDeleteDirectory(tempBase); }
+                    catch
+                    {
+                        // 最後の手段: 再起動後削除を予約
+                        try { MoveFileEx(tempBase, null, MOVEFILE_DELAY_UNTIL_REBOOT); } catch { }
+                    }
+                });
             }
         }
 
-        // Zip Slip / Zip Bomb 防止つき展開
-        static void SafeExtractZip(string zipPath, string extractDir)
+        static void SafeExtractZip(string zipPath, string extractDir, long maxTotalBytes, long maxEntryBytes)
         {
             var basePath = Path.GetFullPath(extractDir);
             if (!basePath.EndsWith(Path.DirectorySeparatorChar.ToString()))
-                basePath += Path.DirectorySeparatorChar; // 末尾セパレータを保証
+                basePath += Path.DirectorySeparatorChar;
 
+            long total = 0;
             using (var zip = ZipFile.OpenRead(zipPath))
             {
                 foreach (var entry in zip.Entries)
                 {
-                    // ZIPは'/'区切りなので正規化
-                    var entryName = entry.FullName.Replace('/', Path.DirectorySeparatorChar);
+                    CheckCancel();
 
-                    // 空エントリはスキップ
+                    // ZIPは'/'区切り
+                    var entryName = entry.FullName.Replace('/', Path.DirectorySeparatorChar);
                     if (string.IsNullOrEmpty(entryName))
                         continue;
 
-                    // 絶対パス／ドライブ直指定は禁止
+                    // ディレクトリエントリ？
+                    bool isDir = entry.FullName.EndsWith("/", StringComparison.Ordinal);
+
+                    // 絶対パス/ドライブ直指定は禁止
                     if (Path.IsPathRooted(entryName))
                         throw new InvalidDataException("無効なZIPエントリ（絶対パス）: " + entry.FullName);
 
                     var combined = Path.GetFullPath(Path.Combine(basePath, entryName));
 
-                    // ベース配下に収まっているか（末尾セパレータ保護付き）
+                    // ベース配下に収まっているか
                     if (!combined.StartsWith(basePath, StringComparison.OrdinalIgnoreCase))
-                        throw new InvalidDataException("無効なZIPエントリ（パストラバーサルの可能性）: " + entry.FullName);
+                        throw new InvalidDataException("無効なZIPエントリ（パストラバーサル）: " + entry.FullName);
 
-                    // ディレクトリエントリ？
-                    if (entry.FullName.EndsWith("/", StringComparison.Ordinal))
+                    if (isDir)
                     {
                         Directory.CreateDirectory(combined);
                         continue;
                     }
 
+                    // Zip Bomb 制限
+                    if (entry.Length > maxEntryBytes)
+                        throw new InvalidDataException($"ZIPエントリが大きすぎます: {entry.FullName} ({entry.Length} bytes)");
+                    total += entry.Length;
+                    if (total > maxTotalBytes)
+                        throw new InvalidDataException("ZIPの展開サイズ上限を超過しました");
+
                     var dirName = Path.GetDirectoryName(combined);
-                    if (!string.IsNullOrEmpty(dirName))
-                    {
-                        Directory.CreateDirectory(dirName);
-                    }
+                    if (!string.IsNullOrEmpty(dirName)) Directory.CreateDirectory(dirName);
+
                     Retry(() => entry.ExtractToFile(combined, overwrite: true));
                 }
             }
         }
 
-        static void ClearDirectory(string dir)
+        static bool AtomicSwap(string targetDir, string stagedDir)
         {
-            // ファイル削除
-            foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly))
+            // stagedDir を targetDir の親配下に移したいので、まず targetDir が存在する前提
+            var parent = Path.GetDirectoryName(targetDir.TrimEnd(Path.DirectorySeparatorChar));
+            if (string.IsNullOrEmpty(parent)) { LogError("AtomicSwap: 親ディレクトリを解決できません。"); return false; }
+
+            var backup = targetDir.TrimEnd(Path.DirectorySeparatorChar) + ".__old";
+            try
             {
-                Retry(() =>
-                {
-                    try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
-                    File.Delete(file);
-                });
+                // 既存バックアップがあれば掃除
+                if (Directory.Exists(backup)) TryDeleteDirectory(backup);
+
+                // target -> backup（同一ボリュームならメタデータ操作で高速）
+                Directory.Move(targetDir, backup);
+
+                // staged -> target（staged は TEMP にあるので、Move 先は parent 直下にする）
+                Directory.Move(stagedDir, targetDir);
+
+                // バックアップ削除
+                TryDeleteDirectory(backup);
+                return true;
             }
-            // サブフォルダ削除
-            foreach (var sub in Directory.EnumerateDirectories(dir, "*", SearchOption.TopDirectoryOnly))
+            catch (Exception ex)
             {
-                Retry(() => TryDeleteDirectory(sub));
+                LogError("Atomic swap 失敗。ロールバック試行: " + ex);
+                try
+                {
+                    if (Directory.Exists(targetDir)) TryDeleteDirectory(targetDir);
+                    if (Directory.Exists(backup)) Directory.Move(backup, targetDir);
+                }
+                catch (Exception rex)
+                {
+                    LogError("ロールバック失敗: " + rex);
+                }
+                return false;
             }
         }
 
         static void CopyAll(DirectoryInfo source, DirectoryInfo target)
         {
-            // ソースのルート末尾に必ずセパレータを付与し、相対パスの計算を安定化
             var srcRoot = source.FullName;
             if (!srcRoot.EndsWith(Path.DirectorySeparatorChar.ToString()))
                 srcRoot += Path.DirectorySeparatorChar;
 
-            // 先にディレクトリを作成
             foreach (var dir in source.EnumerateDirectories("*", SearchOption.AllDirectories))
             {
+                CheckCancel();
                 var rel = dir.FullName.Substring(srcRoot.Length);
                 var destDir = Path.Combine(target.FullName, rel);
                 Directory.CreateDirectory(destDir);
             }
-            // ファイルをコピー
+
             foreach (var file in source.EnumerateFiles("*", SearchOption.AllDirectories))
             {
+                CheckCancel();
                 var rel = file.FullName.Substring(srcRoot.Length);
                 var dest = Path.Combine(target.FullName, rel);
                 var parent = Path.GetDirectoryName(dest);
-                if (!string.IsNullOrEmpty(parent))
-                    Directory.CreateDirectory(parent);
+                if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+
                 Retry(() =>
                 {
+                    CheckCancel();
                     try { if (File.Exists(dest)) File.SetAttributes(dest, FileAttributes.Normal); } catch { }
                     file.CopyTo(dest, true);
                 });
             }
         }
 
-        // 小さなバックオフ付きリトライ（共有違反などの軽微な失敗向け）
+        static void ClearDirectory(string dir)
+        {
+            foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly))
+            {
+                CheckCancel();
+                Retry(() =>
+                {
+                    CheckCancel();
+                    try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
+                    File.Delete(file);
+                });
+            }
+            foreach (var sub in Directory.EnumerateDirectories(dir, "*", SearchOption.TopDirectoryOnly))
+            {
+                CheckCancel();
+                Retry(() => { CheckCancel(); TryDeleteDirectory(sub); });
+            }
+        }
+
         static void Retry(Action action, int attempts = 5, int initialDelayMs = 80)
         {
             var delay = initialDelayMs;
             for (int i = 1; ; i++)
             {
+                CheckCancel();
                 try
                 {
                     action();
@@ -614,7 +644,7 @@ namespace AutoUpdater
                 catch (Exception) when (i < attempts)
                 {
                     Thread.Sleep(delay);
-                    delay *= 2;
+                    delay = Math.Min(delay * 2, 2000);
                 }
             }
         }
@@ -634,7 +664,25 @@ namespace AutoUpdater
             }
             catch
             {
-                // 掃除失敗は致命でないので黙殺
+                // 掃除失敗は致命でないので握りつぶす
+            }
+        }
+
+        static Mutex CreateGlobalMutex(string name)
+        {
+            try
+            {
+                var sec = new MutexSecurity();
+                var me = WindowsIdentity.GetCurrent().User!;
+                sec.AddAccessRule(new MutexAccessRule(me, MutexRights.FullControl, AccessControlType.Allow));
+                sec.AddAccessRule(new MutexAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                                                      MutexRights.FullControl, AccessControlType.Allow));
+                bool createdNew;
+                return new Mutex(false, name, out createdNew, sec);
+            }
+            catch
+            {
+                return null;
             }
         }
     }
